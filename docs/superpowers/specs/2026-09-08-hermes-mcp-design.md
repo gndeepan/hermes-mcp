@@ -42,6 +42,10 @@ out of scope here.
 
 - Not a 1:1 codegen of all 272 endpoints.
 - Not a generic REST proxy / "call any endpoint" tool.
+- Not auto-discovering new tools as the live OpenAPI spec changes — the set
+  of exposed operations is still only ever what's named in the allowlist.
+  Live sync (below) keeps an allowlisted tool's *schema* current; it never
+  adds or removes which operations are exposed.
 - Not responsible for wiring itself into ai-server's agent registry.
 - Not responsible for issuing or refreshing Hermes tokens — it only forwards
   a token it's handed.
@@ -76,13 +80,37 @@ Pydantic AI agent (ai-server)  ──MCP over Streamable HTTP──▶  hermes-m
   truth. Each entry names one Hermes operation — method, path template, a
   curated tool name and description (never the raw Spring "Read"/"Update"
   summary), and a Zod input schema for path/query/body params.
-- **Codegen** (`scripts/generate-schemas.mjs`): reads a cached snapshot of
-  the OpenAPI spec (`openapi/hermes-api-docs.json`, refreshed by a checked-in
-  script, not fetched at runtime) plus the allowlist in `endpoints.ts`, and
-  emits the typed request/response wiring into `src/generated/`. This keeps
-  adding a tool to "one allowlist entry + regenerate," while every exposed
-  operation remains a deliberate, reviewed choice — never a wholesale dump
-  of all 272 operations.
+- **Codegen** (`scripts/generate-schemas.mjs`, dev-time only): reads the
+  checked-in OpenAPI snapshot (`openapi/hermes-api-docs.json`) plus the
+  allowlist in `endpoints.ts`, and emits typed Zod shapes into
+  `src/generated/` purely for editor/type-checking support while authoring a
+  new allowlist entry. This keeps adding a tool to "one allowlist entry +
+  regenerate," while every exposed operation remains a deliberate, reviewed
+  choice — never a wholesale dump of all 272 operations.
+- **Live OpenAPI sync (runtime)**: Hermes's contract for an already-allowlisted
+  operation can change without a `hermes-mcp` deploy (a new optional field, a
+  changed enum, a renamed param), so the server does not run forever on the
+  schema snapshot it started with. On startup, and again every
+  `HERMES_OPENAPI_REFRESH_INTERVAL_S` (default 900s), the server fetches the
+  live spec from `HERMES_OPENAPI_DOCS_URL` (default
+  `https://hermes-atlas.vajro.com/v3/api-docs`) and, for every allowlisted
+  entry, rebuilds its Zod input schema from the fresh spec via the same
+  resolver function the codegen script uses (`src/registry/schemaFromOpenApi.ts`
+  — one implementation, used offline and at runtime, so they can't drift from
+  each other). The rebuilt schema map swaps in atomically; in-flight tool
+  calls finish against whichever schema they started with. A tool call newly
+  arriving after a refresh is validated against the refreshed schema.
+  - **Startup fallback**: if the live fetch fails at startup (network error,
+    non-200, malformed spec), the server logs a warning and starts anyway
+    using the checked-in snapshot's schemas — an unreachable docs endpoint
+    must never prevent the server from starting.
+  - **Steady-state fallback**: if a background refresh fails, the server logs
+    a warning and keeps serving the last-known-good schemas. It never crashes
+    or empties the tool list because of a transient fetch failure.
+  - **Missing operation**: if an allowlisted path+method is no longer present
+    in a freshly fetched spec, that one tool logs an error and keeps its
+    last-known-good schema (other tools refresh normally) — a removed
+    endpoint degrades one tool, not the whole server.
 - **Tool naming**: `hermes_` prefix (`hermes_get_theme`,
   `hermes_list_custom_blocks`, ...) so tools namespace cleanly next to the
   existing `sdk_*` tools from `vajro-custom-blocks-sdk/mcp` when both servers
@@ -101,10 +129,14 @@ Pydantic AI agent (ai-server)  ──MCP over Streamable HTTP──▶  hermes-m
   **tokens are never logged at any level**, full stop — stricter than the
   SDK MCP's "secrets at debug only" rule, because this data is live customer
   data, not authoring-time payloads.
-- **Config**: env vars (`HERMES_MCP_LOG_LEVEL`, `HERMES_BASE_URL`, `PORT`),
+- **Config**: env vars (`HERMES_MCP_LOG_LEVEL`, `HERMES_BASE_URL`,
+  `HERMES_OPENAPI_DOCS_URL`, `HERMES_OPENAPI_REFRESH_INTERVAL_S`, `PORT`),
   validated eagerly at startup — an invalid value fails immediately naming
   the variable and allowed values, so a misconfigured server never starts
-  and behaves oddly.
+  and behaves oddly. `HERMES_BASE_URL` (where tool calls go, e.g.
+  `.../api`) and `HERMES_OPENAPI_DOCS_URL` (where the spec is fetched from,
+  host root) are separate settings — they are different hosts/paths across
+  environments and must not be derived from one another.
 
 ## v1 tool scope
 
@@ -119,7 +151,7 @@ regenerate + review), never a redesign.
 | Themes | `hermes_get_active_theme`, `hermes_get_theme`, `hermes_list_theme_versions` |
 | Custom blocks | `hermes_list_custom_blocks`, `hermes_get_custom_block`, `hermes_create_custom_block`, `hermes_update_custom_block` |
 | Widgets | `hermes_get_widget`, `hermes_update_widget` |
-| Pages | `hermes_list_pages`, `hermes_get_page` |
+| Pages | `hermes_list_pages` (pages of a theme), `hermes_get_page` |
 
 ## Repo & tooling
 
