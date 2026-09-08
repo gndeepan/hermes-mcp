@@ -65,12 +65,13 @@ describe("webLogin", () => {
 
   it("never includes the password in a thrown error", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 401 })));
-    try {
-      await webLogin("https://hermes.test", "d", "me@x.com", "hunter2");
-      throw new Error("expected a throw");
-    } catch (err) {
-      expect(String(err)).not.toContain("hunter2");
-    }
+
+    const error = await webLogin("https://hermes.test", "d", "me@x.com", "hunter2").catch(
+      (err: unknown) => err
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).not.toContain("hunter2");
   });
 });
 

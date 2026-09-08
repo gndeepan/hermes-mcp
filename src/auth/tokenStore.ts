@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import envPaths from "env-paths";
 
@@ -49,12 +49,13 @@ export const createTokenStore = (
       }
     },
     write(credentials: StoredCredentials): void {
-      mkdirSync(path.dirname(file), { recursive: true });
+      mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
       writeFileSync(
         file,
         JSON.stringify({ ...credentials, expiresAt: normalizeExpiresAt(credentials.expiresAt) }, null, 2),
-        "utf-8"
+        { encoding: "utf-8", mode: 0o600 }
       );
+      chmodSync(file, 0o600);
     },
   };
 };

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -56,5 +56,12 @@ describe("createTokenStore", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, "credentials.json"), JSON.stringify({ accessToken: "a" }), "utf-8");
     expect(createTokenStore(dir).read()).toBeNull();
+  });
+
+  it.skipIf(process.platform === "win32")("writes the credentials file owner-only", () => {
+    const store = createTokenStore(dir);
+    store.write({ accessToken: "a", refreshToken: "r", expiresAt: 1_800_000_000_000, storeId: "s1" });
+    const mode = statSync(path.join(dir, "credentials.json")).mode & 0o777;
+    expect(mode).toBe(0o600);
   });
 });
