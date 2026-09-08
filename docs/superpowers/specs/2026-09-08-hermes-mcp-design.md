@@ -6,7 +6,7 @@ Status: approved, pre-implementation
 ## What this is
 
 A new standalone repo, `hermes-mcp`, that exposes a curated set of Hermes Atlas
-backend REST endpoints as MCP tools over Streamable HTTP. Its primary consumer
+backend REST endpoints as MCP tools over stdio. Its primary consumer
 is `ai-server` (the Python/FastAPI/Pydantic AI execution layer) — Pydantic AI
 has native MCP client support, so agents can gain new Hermes capabilities by
 registering a tool in their `agent.yaml` allowlist instead of ai-server hand-coding
@@ -53,40 +53,53 @@ out of scope here.
 ## Architecture
 
 ```
-Pydantic AI agent (ai-server)  ──MCP over Streamable HTTP──▶  hermes-mcp
-     (or: Claude Code / other MCP client)                        │
-   sets Authorization + X-Store-Id per request                   │
-   (the end user's own token — never hermes-mcp's own)            │
-                                                                   ▼
-                                                          Hermes Atlas REST
+claude mcp add hermes-mcp -e HERMES_ACCESS_TOKEN=... -e HERMES_STORE_ID=... -- node dist/server.js
+                          │
+                          ▼  stdio, one process per client/session
+                     hermes-mcp
+                          │
+                          ▼
+                 Hermes Atlas REST
 ```
 
-- **Transport**: Streamable HTTP (`@modelcontextprotocol/sdk`'s
-  `StreamableHTTPServerTransport`), a persistent Node service — not stdio.
-  A shared, multi-tenant server needs per-call credentials, which stdio (one
-  spawned process per session) makes awkward; HTTP lets every request carry
-  its own headers cleanly.
-- **Credential flow**: every tool-call HTTP request must carry
-  `Authorization: Bearer <token>` and `X-Store-Id: <id>`, set by the MCP
-  client (ai-server, using the same end-user token it already receives from
-  the Dashboard). `hermes-mcp` reads these two headers per request,
-  forwards them unchanged to Hermes, and **never stores them** at module or
-  process scope — reconstructed per request, exactly like `UserContext` in
-  `hermes_client.py`. Missing/malformed headers → a 400-shaped tool error
-  returned before any Hermes call is attempted. A 401/403 from Hermes is
-  surfaced as-is: Hermes is the sole authority on what the token may do,
-  `hermes-mcp` never second-guesses it.
+- **Transport**: stdio, via `@modelcontextprotocol/server/stdio`'s
+  `serveStdio` — **the same transport `vajro-custom-blocks-sdk/mcp` already
+  uses**, not Streamable HTTP. There is no hosted service to run this
+  against yet, so a locally-spawned process (registered with `claude mcp
+  add`, or spawned by ai-server as a subprocess for one agent run) is the
+  right default, matching the existing sibling MCP exactly. This is a
+  reversal of an earlier draft of this spec, which chose Streamable HTTP for
+  a hypothetical persistent multi-tenant service — revisit that choice if
+  and when `hermes-mcp` actually gets deployed as a shared service ai-server
+  calls over the network, since the credential model below is deliberately
+  process-scoped, not request-scoped, and assumes one process serves one
+  identity.
+- **Credential flow**: `HERMES_ACCESS_TOKEN` and `HERMES_STORE_ID` are read
+  once from the environment at process startup (config, validated eagerly
+  like every other setting) — **one hermes-mcp process serves exactly one
+  Hermes identity for its whole life**, which is the natural credential
+  boundary for stdio (one process per client/session), just as `UserContext`
+  in `hermes_client.py` is the natural boundary per HTTP request for that
+  Python service. Never logged, never sent anywhere but as the
+  `Authorization`/`X-Store-Id` headers on calls to Hermes. `tools/list`
+  works with no credentials configured; an actual tool call with no
+  credentials configured returns a `MISSING_CREDENTIALS` tool error before
+  any Hermes call is attempted. A 401/403 from Hermes is surfaced as-is:
+  Hermes is the sole authority on what the token may do, `hermes-mcp` never
+  second-guesses it.
 - **Tool registry** (`src/registry/endpoints.ts`): the single source of
   truth. Each entry names one Hermes operation — method, path template, a
   curated tool name and description (never the raw Spring "Read"/"Update"
   summary), and a Zod input schema for path/query/body params.
-- **Codegen** (`scripts/generate-schemas.mjs`, dev-time only): reads the
-  checked-in OpenAPI snapshot (`openapi/hermes-api-docs.json`) plus the
-  allowlist in `endpoints.ts`, and emits typed Zod shapes into
-  `src/generated/` purely for editor/type-checking support while authoring a
-  new allowlist entry. This keeps adding a tool to "one allowlist entry +
-  regenerate," while every exposed operation remains a deliberate, reviewed
-  choice — never a wholesale dump of all 272 operations.
+- **Adding a tool** is one entry in `src/registry/endpoints.ts` (tool name,
+  method, path template, description) plus, if it's worth the review, a run
+  of `scripts/print-tool-schemas.mjs` (dev-time only) — it compiles every
+  allowlisted entry against the checked-in OpenAPI snapshot and prints each
+  tool's resolved Zod shape so the author can eyeball it before committing.
+  The same resolver (`src/registry/schemaFromOpenApi.ts`) backs this script,
+  the startup compile, and the live refresh below — one implementation, so
+  they can't drift from each other. Every exposed operation remains a
+  deliberate, reviewed choice — never a wholesale dump of all 272.
 - **Live OpenAPI sync (runtime)**: Hermes's contract for an already-allowlisted
   operation can change without a `hermes-mcp` deploy (a new optional field, a
   changed enum, a renamed param), so the server does not run forever on the
@@ -115,28 +128,32 @@ Pydantic AI agent (ai-server)  ──MCP over Streamable HTTP──▶  hermes-m
   `hermes_list_custom_blocks`, ...) so tools namespace cleanly next to the
   existing `sdk_*` tools from `vajro-custom-blocks-sdk/mcp` when both servers
   are registered with the same client.
-- **`src/hermesClient.ts`**: thin fetch/axios wrapper, one per-request
-  instance constructed from the incoming headers (mirrors the Python
-  `HermesClient`). Unwraps Hermes's `{"data": ...}` envelope. Maps
-  transport errors, 401/403/404/5xx to structured MCP tool errors with the
-  same shape ai-server's error envelope already uses, so failures aren't a
-  new shape for the agent to learn.
+- **`src/hermesClient.ts`**: thin `fetch`-based wrapper built once per
+  process from the configured credentials (mirrors the Python
+  `HermesClient`/`UserContext` split, just at process granularity instead of
+  request granularity). Unwraps Hermes's `{"data": ...}` envelope. Maps
+  transport errors and 401/403/404/4xx/5xx to typed errors that a `wrap()`
+  layer turns into structured, visible MCP tool results — a Hermes rejection
+  is a legitimate answer the agent needs to see (not hidden behind a
+  correlation id the way a genuinely unexpected internal fault is).
 - **Observability**: one `wrap()` around every tool handler for timing and
-  structured JSON logs to stderr (never stdout — reserved for the MCP
-  transport's own framing even though we're on HTTP, kept as a hard rule for
-  consistency with the SDK MCP and to avoid ever accidentally polluting a
-  future stdio mode). Request/response bodies logged only at `debug`;
-  **tokens are never logged at any level**, full stop — stricter than the
-  SDK MCP's "secrets at debug only" rule, because this data is live customer
-  data, not authoring-time payloads.
+  structured JSON logs to stderr — **stdout is the MCP transport**, so
+  `console.log`/`process.stdout.write` anywhere under `src/` is a hard
+  failure, exactly as in the SDK MCP. Request/response bodies logged only at
+  `debug`; **tokens are never logged at any level**, full stop — the logger
+  itself redacts any field shaped like one as a second line of defence,
+  stricter than the SDK MCP's "secrets at debug only" rule, because this is
+  live customer data, not authoring-time payloads.
 - **Config**: env vars (`HERMES_MCP_LOG_LEVEL`, `HERMES_BASE_URL`,
-  `HERMES_OPENAPI_DOCS_URL`, `HERMES_OPENAPI_REFRESH_INTERVAL_S`, `PORT`),
-  validated eagerly at startup — an invalid value fails immediately naming
-  the variable and allowed values, so a misconfigured server never starts
-  and behaves oddly. `HERMES_BASE_URL` (where tool calls go, e.g.
-  `.../api`) and `HERMES_OPENAPI_DOCS_URL` (where the spec is fetched from,
-  host root) are separate settings — they are different hosts/paths across
-  environments and must not be derived from one another.
+  `HERMES_OPENAPI_DOCS_URL`, `HERMES_OPENAPI_REFRESH_INTERVAL_S`,
+  `HERMES_ACCESS_TOKEN`, `HERMES_STORE_ID`), validated eagerly at startup —
+  an invalid value fails immediately naming the variable and allowed
+  values, so a misconfigured server never starts and behaves oddly.
+  `HERMES_BASE_URL` (where tool calls go — host root, e.g.
+  `https://hermes-atlas.vjr-dev.com`) and `HERMES_OPENAPI_DOCS_URL` (where
+  the spec is fetched from) are separate settings on separate hosts/paths
+  and must not be derived from one another. `HERMES_ACCESS_TOKEN` and
+  `HERMES_STORE_ID` must be set together or not at all.
 
 ## v1 tool scope
 
@@ -160,18 +177,24 @@ regenerate + review), never a redesign.
 - Node 20, TypeScript, esbuild bundle (same toolchain choice as
   `vajro-custom-blocks-sdk/mcp`, for convention consistency even though this
   server is architecturally different in kind).
-- vitest for tests: unit tests per tool with a mocked `HermesClient`; an
-  integration test driving a real server over the Streamable HTTP transport;
-  an explicit test that a tool call missing `Authorization`/`X-Store-Id`
-  never reaches Hermes.
-- `claude mcp add --transport http hermes-mcp <url>` for interactive
-  registration once a dev instance is running.
+- vitest for tests: unit tests per tool with a mocked/injected Hermes
+  client; an integration test driving a real server over
+  `InMemoryTransport` (the same pattern `vajro-custom-blocks-sdk/mcp`'s own
+  `integration.test.ts` uses); an explicit test that a tool call with no
+  credentials configured never reaches Hermes.
+- `claude mcp add hermes-mcp --scope user -e HERMES_MCP_LOG_LEVEL=info
+  -e HERMES_ACCESS_TOKEN=<token> -e HERMES_STORE_ID=<id> -- node
+  "/absolute/path/to/hermes-mcp/dist/server.js"` for interactive
+  registration — identical in shape to how the SDK MCP is registered today.
 
 ## Hard constraints (mirrors the SDK MCP's four, adapted for a server that
 executes real calls)
 
-1. Never write to stdout — logger writes to stderr only.
-2. Never store a credential outside the lifetime of a single request.
+1. Never write to stdout — stdout is the MCP transport; the logger writes to
+   stderr only.
+2. Never store a credential outside the process it was configured for — one
+   `hermes-mcp` process serves exactly one Hermes identity, read once from
+   the environment at startup, never refreshed or overwritten mid-process.
 3. Never expose a Hermes operation that isn't a named entry in
    `src/registry/endpoints.ts` — no dynamic/generic path construction from
    caller input.
