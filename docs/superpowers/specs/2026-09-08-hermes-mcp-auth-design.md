@@ -184,11 +184,18 @@ itself). Purely additive — it does not replace the interval, which keeps runni
 
 `wrap()` (base spec, Task 8) generates one correlation id per call (same
 `randomBytes(4).toString("hex")` already used in `errors.ts`'s unexpected-error
-path) and logs `{ tool, traceId, durationMs, outcome }` at `info`. `HermesClient`
-accepts an optional `traceId` on `request()` and logs `{ traceId, method, path,
-status }` at `debug` — enough to grep one call's full path through stderr by its
-id. Tokens are still never logged, at any level, per the base spec's hard
-constraint #4 — this is additive to that logger, not a new one.
+path) and is the *only* place that logs — consistent with the base spec's
+existing principle that all observability lives in `wrap()`, once.
+`HermesClient` itself stays exactly as Task 4 built it: no logger dependency, no
+`traceId` parameter, unchanged. `wrap()` already computes the method and
+substituted path before calling the client (it has to, to make the call), so it
+logs `{ tool, traceId, method, path, durationMs, outcome }` at `debug` right
+before the call and `{ tool, traceId, durationMs, outcome }` at `info` after —
+on failure, the caught error's own type/status (e.g. `HermesRejectedError.status`)
+is already in the log line via the existing `toToolResult`/error-mapping path.
+Enough to grep one call's full path through stderr by its id, with zero change
+to `HermesClient`. Tokens are still never logged, at any level, per the base
+spec's hard constraint #4.
 
 ## Error handling
 
