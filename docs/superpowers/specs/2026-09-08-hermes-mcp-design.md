@@ -92,14 +92,12 @@ claude mcp add hermes-mcp -e HERMES_ACCESS_TOKEN=... -e HERMES_STORE_ID=... -- n
   curated tool name and description (never the raw Spring "Read"/"Update"
   summary), and a Zod input schema for path/query/body params.
 - **Adding a tool** is one entry in `src/registry/endpoints.ts` (tool name,
-  method, path template, description) plus, if it's worth the review, a run
-  of `scripts/print-tool-schemas.mjs` (dev-time only) — it compiles every
-  allowlisted entry against the checked-in OpenAPI snapshot and prints each
-  tool's resolved Zod shape so the author can eyeball it before committing.
-  The same resolver (`src/registry/schemaFromOpenApi.ts`) backs this script,
-  the startup compile, and the live refresh below — one implementation, so
-  they can't drift from each other. Every exposed operation remains a
-  deliberate, reviewed choice — never a wholesale dump of all 272.
+  method, path template, description) plus running the tests — the same
+  resolver (`src/registry/schemaFromOpenApi.ts`) backs the startup compile,
+  the live refresh below, and a test that compiles every allowlisted entry
+  against the checked-in snapshot, so a bad entry fails a test rather than
+  needing a human to eyeball generated output. Every exposed operation
+  remains a deliberate, reviewed choice — never a wholesale dump of all 272.
 - **Live OpenAPI sync (runtime)**: Hermes's contract for an already-allowlisted
   operation can change without a `hermes-mcp` deploy (a new optional field, a
   changed enum, a renamed param), so the server does not run forever on the
