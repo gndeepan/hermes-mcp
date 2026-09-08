@@ -3,6 +3,7 @@ import { SchemaRegistry } from "../../src/registry/schemaRegistry.js";
 import { loadSnapshotDoc } from "../../src/registry/snapshot.js";
 import { ENDPOINTS } from "../../src/registry/endpoints.js";
 import { createLogger } from "../../src/logging.js";
+import { MissingOperationError } from "../../src/errors.js";
 
 describe("SchemaRegistry", () => {
   it("compiles every allowlisted endpoint against the checked-in snapshot", () => {
@@ -35,5 +36,13 @@ describe("SchemaRegistry", () => {
 
     registry.refresh(patched, logger);
     expect(registry.get("hermes_get_widget").paramLocations).toEqual({});
+  });
+
+  it("throws MissingOperationError from fromDocument when an allowlisted operation can't be compiled", () => {
+    const doc = loadSnapshotDoc();
+    const patched = structuredClone(doc);
+    delete patched.paths["/api/v1/widgets/{id}"];
+
+    expect(() => SchemaRegistry.fromDocument(patched)).toThrow(MissingOperationError);
   });
 });
