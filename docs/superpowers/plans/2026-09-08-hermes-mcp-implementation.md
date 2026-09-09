@@ -3836,152 +3836,72 @@ git commit -m "feat: log in with an emailed one-time code and register the chose
 
 ---
 
-### Task 16: Fetch the store list the way the Dashboard does, and restyle the login to match it
+### Task 16: Restyle the login screens to match the Dashboard
+
+> **Supersedes an earlier draft of this task.** That draft also proposed sourcing
+> the store list from `POST /v1/auth/refresh`. It was written without knowledge of
+> commit `33e3b2f`, which had already fixed the empty-picker defect a different
+> and better way — by letting an admin search for stores
+> (`GET /api/v1/stores/search`, a `/search-stores` route, a dropdown that keeps
+> unusable stores visible but disabled). That fix is tested and working, so this
+> task is **UI only**: no logic, no routes, no endpoints change.
 
 **Files:**
-- Modify: `src/auth/hermesAuth.ts`
 - Modify: `src/login/loginPage.ts`
-- Modify: `src/login/loginServer.ts`
-- Modify: `test/auth/hermesAuth.test.ts`
-- Modify: `test/login/loginServer.test.ts`
+- Modify: `test/login/loginServer.test.ts` (only if a copy assertion needs updating)
 
-**Interfaces:**
-- Consumes: `TokenStore` from `src/auth/tokenStore.ts`
-- Produces:
-  - `RefreshResult` gains `stores: LoginStore[]` (the `/auth/refresh` response is the same `WebTokenResponseDto` shape as `/auth/web`, which the current narrow type was discarding)
-  - `export const renderEmailForm: (error?: string) => string` (restyled; unchanged signature)
-  - `export const renderOtpForm: (email: string, error?: string) => string` (restyled; unchanged signature)
-  - `export const renderStorePicker: (stores: LoginStore[], error?: string) => string` (restyled; **gains** an optional error argument)
-  - `export const renderNoStores: () => string` (new)
-  - `export const renderDone: () => string` (restyled; unchanged signature)
+**Interfaces:** unchanged. Every export keeps its exact current signature —
+`renderEmailForm(error?)`, `renderOtpForm(email, error?)`,
+`renderStorePicker(view: StorePickerView)`, `renderMessage(heading, body)`,
+`renderDone()`, and the `StorePickerView` interface. `src/login/loginServer.ts`
+must not change at all.
 
-**Two defects this fixes, both observed against the real server:**
+**What this is:** the login screens currently use placeholder styling (system
+font, `#8888` borders, 4px radii, `background: canvas`). Restyle them to match
+the Dashboard's own login screen, whose values are resolved below, and upgrade
+the one-time-code field to the eight separate boxes the Dashboard uses.
 
-1. **The store picker rendered with zero options.** The code read `stores[]` straight from the `/api/v1/auth/web` response, which came back empty for a real account that does have stores. The Dashboard does not trust that field either: `StoreSwitchContainer.tsx` calls `POST /v1/auth/refresh` on mount purely to re-fetch `stores`/`isAdmin` fresh, and `LoginNew.tsx` has the read-from-login-response line commented out. So the authoritative list comes from the refresh call, not the login call.
-2. **The one-time code is 8 digits, not 6.** The Dashboard renders `OTPInput length={8}` and rejects anything shorter with "Enter the full OTP".
+**Design values**, taken from the Dashboard: `apps/platform/src/index.css` (the
+`:root` palette), `apps/platform/tailwind.config.js` (`shadow-v1`, font scale),
+`packages/theme/lib/index.ts` (typography), and
+`packages/components/src/{input,button,otpInput}`:
 
-- [ ] **Step 1: Widen `RefreshResult` and add a store-list fetch in `src/auth/hermesAuth.ts`**
+| Thing | Value |
+|---|---|
+| Font | `Figtree` (Google Fonts), root font-size **14px** |
+| Primary button | bg `#915ee9`, hover `#8948df`, active `#7935cc`, white text, 14px/600, min-height 36px, padding 8px 16px, radius 8px |
+| Card | white, border `1px solid #efeff0`, radius **16px**, shadow `1px 1px 16px 0 rgba(0,0,0,0.08)`, padding 24px, max-width **448px**, centered |
+| Heading "Welcome back to" | 24px / 36px line-height, weight 600, colour `#323234` |
+| Card heading | 20px, weight 600 |
+| Body text | `#323234`; muted `#8e8f95` |
+| Label | 14px, weight 500, colour `#7e7f86` |
+| Input | min-height 40px, padding 8px 12px, 14px, radius 8px, border `#cfd0d3`, placeholder `#babbc0`, focus outline `1px solid #92939b`, text `#66666e` |
+| Error text | `#a40d3c`, 12px |
+| OTP boxes | 8 boxes, 40px square (48px ≥640px), centered, gap 8px, radius 8px, focus outline primary |
+| Logo | `https://res.cloudinary.com/vajrohq/image/upload/q_auto/v1765299026/modernization/xrumgrtdbb2fyenxkkoa.png`, rendered ~200px wide |
 
-`RefreshResult` currently omits `stores`, silently dropping the field the refresh response actually carries. Widen it and add a helper that fetches the authoritative list. Keep `unwrap`, `postJson`, `sendEmailOtp`, `webLogin`, `storeLogin` and `refreshAccessToken`'s signature as they are.
+Dashboard copy worth adopting: `Welcome back to` above the logo, `Login` as the
+email screen's button, `Sign In` as the code screen's heading,
+`Enter the verification code sent to:` above the email address, `Verify OTP` as
+its button, and `Select a Store` as the picker heading.
 
-```ts
-export interface RefreshResult {
-  accessToken: string;
-  refreshToken: string;
-  expiresAt: number;
-  /**
-   * The refresh response repeats the full login payload, stores included.
-   * This is the authoritative list: /api/v1/auth/web's own `stores` can come
-   * back empty for an account that does have stores, which is why the
-   * Dashboard re-fetches here rather than reading it from the login response.
-   */
-  stores: LoginStore[];
-}
-```
+**Four things the tests pin — do not break them:**
+- The code screen must still contain the literal phrase **`one-time code`** (two tests assert it) and an input named **`otp`**. The eight boxes therefore post through one hidden `name="otp"` field, and the boxes keep a visible label containing that phrase.
+- The picker must still emit `<select name="storeId"` and options of the exact form `<option value="s1">Store One…` / `<option value="" disabled>… (modernization not enabled)</option>`.
+- The search form must still post to `/search-stores` with an input named `query`.
+- The email screen must still have `name="email"` and must not contain `name="domain"` or `name="password"`.
 
-Then, below `refreshAccessToken`:
+Keep `escapeHtml`, `storeLabel`, `storeOption`, `searchBox`, `storeDropdown`,
+and all of `renderStorePicker`'s choosable/empty-note logic exactly as they are —
+restyle their markup, don't rewrite their behaviour.
 
-```ts
-/**
- * The stores this account may act as, taken from the refresh response the way
- * the Dashboard's store picker does. Falls back to the login response's own
- * list when refresh returns none, so a working login is never blocked by this.
- */
-export const fetchStores = async (
-  baseUrl: string,
-  refreshToken: string,
-  fallback: LoginStore[]
-): Promise<LoginStore[]> => {
-  const refreshed = await refreshAccessToken(baseUrl, refreshToken);
-  return refreshed.stores?.length ? refreshed.stores : fallback;
-};
-```
+- [ ] **Step 1: Replace the `<style>` block and the page shell in `src/login/loginPage.ts`**
 
-- [ ] **Step 2: Add the tests for both, in `test/auth/hermesAuth.test.ts`**
+Swap the current `page()` for a styled shell. Keep the function's name and its
+single-string-argument signature so every caller is unaffected.
 
 ```ts
-describe("fetchStores", () => {
-  const storeList = [{ id: "s1", name: "Store One", domain: "one.myshopify.com" }];
-
-  it("returns the refresh response's stores", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response(
-        JSON.stringify({ data: { accessToken: "a2", refreshToken: "r2", expiresAt: 1, stores: storeList } }),
-        { status: 200 }
-      ))
-    );
-
-    expect(await fetchStores("https://hermes.test", "r", [])).toEqual(storeList);
-  });
-
-  it("falls back to the login response's stores when refresh returns none", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response(
-        JSON.stringify({ data: { accessToken: "a2", refreshToken: "r2", expiresAt: 1, stores: [] } }),
-        { status: 200 }
-      ))
-    );
-
-    expect(await fetchStores("https://hermes.test", "r", storeList)).toEqual(storeList);
-  });
-});
-```
-
-- [ ] **Step 3: Use it in `src/login/loginServer.ts`**
-
-Add `fetchStores` to the imports and to `LoginServerDeps` as an injectable double:
-
-```ts
-  stores?: typeof fetchStores;
-```
-
-Resolve it alongside the others (`const listStores = deps.stores ?? fetchStores;`).
-
-In the `POST /verify-otp` branch, after `login(...)` succeeds, resolve the authoritative list before deciding which screen to show. Wrap it so a refresh failure degrades to the login response's own list rather than failing the login outright:
-
-```ts
-  let stores = result.stores ?? [];
-  try {
-    stores = await listStores(deps.hermesBaseUrl, result.refreshToken, stores);
-  } catch {
-    // The login itself succeeded; fall back to whatever it gave us.
-  }
-
-  pending = {
-    accessToken: result.accessToken,
-    refreshToken: result.refreshToken,
-    expiresAt: result.expiresAt,
-    stores,
-  };
-```
-
-Then use `stores` — not `result.stores` — in all three subsequent branches (the `presetStoreId` membership check and its "available store ids" message, the `stores.length === 1` case, and the picker). Add one branch **before** them, so an account with no stores gets the Dashboard's own explanation instead of an empty picker:
-
-```ts
-  if (stores.length === 0) {
-    html(res, 200, renderNoStores());
-    settle(false);
-    return;
-  }
-```
-
-- [ ] **Step 4: Rewrite `src/login/loginPage.ts` to match the Dashboard's login screens**
-
-Replace the whole file. The values below are taken from the Dashboard: `apps/platform/src/index.css` (the `:root` palette), `apps/platform/tailwind.config.js` (`shadow-v1`, the font scale), `packages/theme/lib/index.ts` (typography), `packages/components/src/{input,button,otpInput}`, and the copy is verbatim from `containers/login/LoginNew.tsx` and `containers/storeSwitchContainer/StoreSwitchContainer.tsx`.
-
-```ts
-import type { LoginStore } from "../auth/hermesAuth.js";
-
-const escapeHtml = (value: string): string =>
-  value.replace(
-    /[&<>"']/g,
-    (char) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char] as string
-  );
-
-/** The Superfans wordmark the Dashboard's login screen loads. */
+/** The Superfans wordmark the Dashboard's own login screen loads. */
 const LOGO_URL =
   "https://res.cloudinary.com/vajrohq/image/upload/q_auto/v1765299026/modernization/xrumgrtdbb2fyenxkkoa.png";
 
@@ -4021,6 +3941,7 @@ const page = (body: string): string => `<!doctype html>
     background: #fff;
     color: var(--neutral-900);
     font-family: Figtree, system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.5;
   }
   .shell { width: 100%; max-width: 448px; }
   .brand { font-size: 24px; line-height: 36px; font-weight: 600; margin: 0; }
@@ -4028,18 +3949,20 @@ const page = (body: string): string => `<!doctype html>
   .logo img { width: 200px; height: auto; display: block; }
   .card {
     padding: 24px;
+    background: #fff;
     border: 1px solid var(--secondary-050);
     border-radius: 16px;
     box-shadow: 1px 1px 16px 0 rgba(0, 0, 0, 0.08);
-    background: #fff;
   }
-  h2 { font-size: 20px; font-weight: 600; margin: 0 0 1rem; }
-  .muted { color: var(--neutral-500); margin: 0 0 0.75rem; }
-  .sent-to { font-weight: 500; color: var(--neutral-500); margin: 0 0 1.5rem; }
-  label { display: block; font-size: 14px; font-weight: 500; color: var(--secondary-600); margin-bottom: 0.25rem; }
-  input[type="email"], input[type="text"] {
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 1rem; }
+  p { margin: 0 0 0.75rem; }
+  .muted { color: var(--neutral-500); }
+  .sent-to { font-weight: 500; color: var(--neutral-500); margin-bottom: 1.5rem; }
+  label { display: block; font-size: 14px; font-weight: 500; color: var(--secondary-600); margin-top: 0.75rem; }
+  input, select {
     width: 100%;
     min-height: 40px;
+    margin-top: 0.25rem;
     padding: 8px 12px;
     font: inherit;
     font-size: 14px;
@@ -4048,15 +3971,16 @@ const page = (body: string): string => `<!doctype html>
     border: 1px solid var(--secondary-200);
     border-radius: 8px;
   }
+  select { cursor: pointer; }
   input::placeholder { color: var(--secondary-300); }
-  input:focus-visible { outline: 1px solid #92939b; outline-offset: 0; }
-  .otp { display: flex; justify-content: center; gap: 8px; }
+  input:focus-visible, select:focus-visible { outline: 1px solid #92939b; }
+  .otp { display: flex; justify-content: center; gap: 8px; margin-top: 0.5rem; }
   .otp input {
-    width: 40px; height: 40px; padding: 0;
+    width: 40px; height: 40px; min-height: 40px; margin-top: 0; padding: 0;
     text-align: center; font-size: 18px;
-    border: 1px solid var(--secondary-200); border-radius: 8px;
   }
   .otp input:focus-visible { outline: 1px solid var(--primary-400); }
+  hr { border: none; border-top: 1px solid var(--secondary-050); margin: 1.75rem 0; }
   button {
     width: 100%;
     min-height: 36px;
@@ -4073,195 +3997,137 @@ const page = (body: string): string => `<!doctype html>
   }
   button:hover { background: var(--primary-500); }
   button:active { background: var(--primary-600); }
-  .store { margin-top: 0.5rem; }
-  .store button { margin-top: 0; text-align: left; }
   .error { color: var(--error-700); font-size: 12px; margin: 1rem 0 0; }
-  @media (min-width: 640px) { .otp input { width: 48px; height: 48px; font-size: 20px; } }
+  .empty { color: var(--neutral-500); font-size: 12px; margin: 1.5rem 0 0; }
+  @media (min-width: 640px) { .otp input { width: 48px; height: 48px; min-height: 48px; font-size: 20px; } }
 </style>
 </head>
-<body><main class="shell">${body}</main></body>
-</html>`;
-
-const shell = (body: string): string =>
-  page(`
+<body><main class="shell">
   <p class="brand">Welcome back to</p>
   <div class="logo"><img src="${LOGO_URL}" alt="Superfans" width="200"></div>
-  <div class="card">${body}</div>`);
+  <div class="card">${body}</div>
+</main></body>
+</html>`;
+```
 
+- [ ] **Step 2: Restyle the email screen**
+
+```ts
 export const renderEmailForm = (error?: string): string =>
-  shell(`
-    <form method="post" action="/request-otp">
-      <label for="email">Email</label>
-      <input id="email" name="email" type="email" placeholder="name@email.com" required autofocus
+  page(`
+  <h1>Log in to Hermes</h1>
+  ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+  <form method="post" action="/request-otp">
+    <label>Email
+      <input name="email" type="email" placeholder="name@email.com" required autofocus
              autocomplete="username">
-      ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
-      <button type="submit">Login</button>
-    </form>`);
+    </label>
+    <button type="submit">Login</button>
+  </form>`);
+```
 
-/** Eight boxes, matching the Dashboard's `OTPInput length={8}`. */
+- [ ] **Step 3: Replace the code screen's single field with eight boxes**
+
+The Dashboard uses eight boxes (`OTPInput length={8}`) and the real codes are
+eight digits. The boxes post through one hidden `name="otp"` field, so the
+server side is untouched. Keep the words `one-time code` in the label — two
+tests assert that phrase.
+
+```ts
+/** Eight boxes joined into one hidden field, matching the Dashboard's OTPInput length={8}. */
 export const renderOtpForm = (email: string, error?: string): string =>
-  shell(`
-    <h2>Sign In</h2>
-    <p class="muted">Enter the verification code sent to:</p>
-    <p class="sent-to">${escapeHtml(email)}</p>
-    <form method="post" action="/verify-otp" id="otp-form">
-      <input type="hidden" name="email" value="${escapeHtml(email)}">
-      <input type="hidden" name="otp" id="otp-value">
-      <div class="otp">
-        ${Array.from({ length: 8 }, (_, index) =>
-          `<input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" aria-label="Digit ${index + 1}"${index === 0 ? " autofocus" : ""}>`
-        ).join("\n        ")}
-      </div>
-      ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
-      <button type="submit">Verify OTP</button>
-    </form>
-    <script>
-      // Joins the eight boxes into the hidden field, and advances focus as you type.
-      const boxes = Array.from(document.querySelectorAll(".otp input"));
-      const target = document.getElementById("otp-value");
-      const sync = () => { target.value = boxes.map((box) => box.value).join(""); };
-      boxes.forEach((box, index) => {
-        box.addEventListener("input", () => {
-          box.value = box.value.replace(/\\D/g, "").slice(0, 1);
-          sync();
-          if (box.value && index < boxes.length - 1) boxes[index + 1].focus();
-        });
-        box.addEventListener("keydown", (event) => {
-          if (event.key === "Backspace" && !box.value && index > 0) boxes[index - 1].focus();
-        });
-        box.addEventListener("paste", (event) => {
-          event.preventDefault();
-          const digits = (event.clipboardData.getData("text") || "").replace(/\\D/g, "").slice(0, boxes.length);
-          digits.split("").forEach((digit, offset) => { boxes[offset].value = digit; });
-          sync();
-          boxes[Math.min(digits.length, boxes.length - 1)].focus();
-        });
+  page(`
+  <h1>Sign In</h1>
+  <p class="muted">Enter the verification code sent to:</p>
+  <p class="sent-to">${escapeHtml(email)}</p>
+  ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+  <form method="post" action="/verify-otp">
+    <input type="hidden" name="email" value="${escapeHtml(email)}">
+    <input type="hidden" name="otp" id="otp-value">
+    <label>One-time code</label>
+    <div class="otp">
+      ${Array.from(
+        { length: 8 },
+        (_, index) =>
+          `<input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="1" aria-label="Digit ${
+            index + 1
+          }"${index === 0 ? " autofocus" : ""}>`
+      ).join("\n      ")}
+    </div>
+    <button type="submit">Verify OTP</button>
+  </form>
+  <script>
+    const boxes = Array.from(document.querySelectorAll(".otp input"));
+    const target = document.getElementById("otp-value");
+    const sync = () => { target.value = boxes.map((box) => box.value).join(""); };
+    boxes.forEach((box, index) => {
+      box.addEventListener("input", () => {
+        box.value = box.value.replace(/\\D/g, "").slice(0, 1);
+        sync();
+        if (box.value && index < boxes.length - 1) boxes[index + 1].focus();
       });
-    </script>`);
-
-export const renderStorePicker = (stores: LoginStore[], error?: string): string =>
-  shell(`
-    <h2>Select a Store</h2>
-    <p class="muted">Enter store ID/store name</p>
-    ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
-    ${stores
-      .map(
-        (store) => `<form class="store" method="post" action="/select-store">
-      <input type="hidden" name="storeId" value="${escapeHtml(store.id)}">
-      <button type="submit">${escapeHtml(store.name)}</button>
-    </form>`
-      )
-      .join("\n    ")}`);
-
-export const renderNoStores = (): string =>
-  shell(`
-    <h2>Select a Store</h2>
-    <p class="muted">You cannot access any store. Please contact the Vajro Support Team!</p>`);
-
-export const renderDone = (): string =>
-  shell(`
-    <h2>Logged in</h2>
-    <p class="muted">Credentials saved. You can close this tab and start the MCP server.</p>`);
+      box.addEventListener("keydown", (event) => {
+        if (event.key === "Backspace" && !box.value && index > 0) boxes[index - 1].focus();
+      });
+      box.addEventListener("paste", (event) => {
+        event.preventDefault();
+        const digits = (event.clipboardData.getData("text") || "").replace(/\\D/g, "").slice(0, boxes.length);
+        digits.split("").forEach((digit, offset) => { boxes[offset].value = digit; });
+        sync();
+        boxes[Math.min(digits.length, boxes.length - 1)].focus();
+      });
+    });
+  </script>`);
 ```
 
-Two notes on this markup. The eight OTP boxes need a few lines of inline script to join into one field, because a plain form would otherwise post eight separate values — the script is progressive-enhancement only in the sense that the hidden field is what posts; without JS the form would submit an empty code, which the server already rejects with a re-rendered form. And `renderStorePicker` shows the store **name only**, matching the Dashboard's `labelKey='name'` with no custom option renderer — no domain, no logo, no badge.
+Note the doubled backslashes in `/\\D/g` — they are inside a TypeScript template
+literal, so the emitted HTML carries `/\D/g`. Verify that in the built output,
+not just by reading the source.
 
-- [ ] **Step 5: Update `test/login/loginServer.test.ts`**
+- [ ] **Step 4: Restyle the picker's heading and the search box's label; change nothing else about it**
 
-Give every test's deps a `stores` double so no test reaches the real refresh endpoint:
+In `renderStorePicker`, change the heading from `Pick a store` to
+`Select a Store` and mark the empty note as muted. Leave `storeLabel`,
+`storeOption`, `storeDropdown`, the `choosable` calculation, the `emptyNote`
+wording, and the `<hr>` placement exactly as they are.
 
-```ts
-  stores: async (_base: string, _token: string, fallback: LoginStore[]) => fallback,
-```
+In `searchBox`, keep the action, the input name, and the `required`/`value`
+attributes identical; the styling comes from the stylesheet.
 
-Adapt the existing picker/preset/single-store assertions if they matched on removed copy — the picker's heading is now `Select a Store` and options show the name only. Then add these three cases:
+- [ ] **Step 5: Run the covering tests**
 
-```ts
-it("takes the store list from the refresh response, not the login response", async () => {
-  const login = async () => ({
-    userId: "u1", accessToken: "a", refreshToken: "r", expiresAt: 1_800_000_000_000,
-    isAdmin: false, stores: [],
-  });
-  const stores = vi.fn(async () => [
-    { id: "s1", name: "Store One", domain: "one.myshopify.com" },
-    { id: "s2", name: "Store Two", domain: "two.myshopify.com" },
-  ]);
-  server = await startLoginServer({ ...baseDeps(), login, stores });
+Run: `npx vitest run test/login/loginServer.test.ts`
 
-  const res = await fetch(`http://127.0.0.1:${server.port}/verify-otp`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email: "me@x.com", otp: "87601701" }),
-  });
+If a test fails only because it asserted the old `Pick a store` heading, update
+that assertion to the new copy. If any test fails for a structural reason — a
+missing `name="otp"`, a changed `<option>` shape, a missing
+`action="/search-stores"` — that is the restyle breaking behaviour, not a stale
+assertion: fix the markup rather than the test.
 
-  const body = await res.text();
-  expect(body).toContain("Select a Store");
-  expect(body).toContain("Store One");
-  expect(body).toContain("Store Two");
-  expect(stores).toHaveBeenCalledWith(expect.any(String), "r", []);
-});
+- [ ] **Step 6: Typecheck and the full suite**
 
-it("explains the situation when the account has no stores at all", async () => {
-  const login = async () => ({
-    userId: "u1", accessToken: "a", refreshToken: "r", expiresAt: 1_800_000_000_000,
-    isAdmin: false, stores: [],
-  });
-  const store = fakeStore();
-  server = await startLoginServer({ ...baseDeps(), store, login, stores: async () => [] });
+Run: `npm run typecheck` then `npx vitest run`
+Expected: clean; 137 passing + 1 platform-skipped, apart from the known
+`test/logging.test.ts` stderr line.
 
-  const res = await fetch(`http://127.0.0.1:${server.port}/verify-otp`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email: "me@x.com", otp: "87601701" }),
-  });
-
-  expect(await res.text()).toContain("cannot access any store");
-  expect(store.written).toHaveLength(0);
-  await expect(server.waitForCompletion()).resolves.toBe(false);
-});
-
-it("still logs in when the store refresh fails", async () => {
-  const stores = vi.fn(async () => {
-    throw new Error("Hermes /api/v1/auth/refresh failed with status 500");
-  });
-  const store = fakeStore();
-  server = await startLoginServer({ ...baseDeps(), store, stores, login: singleStoreLogin });
-
-  await fetch(`http://127.0.0.1:${server.port}/verify-otp`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email: "me@x.com", otp: "87601701" }),
-  });
-
-  // The login response's own single store is enough to finish.
-  expect(store.written).toHaveLength(1);
-  await expect(server.waitForCompletion()).resolves.toBe(true);
-});
-```
-
-- [ ] **Step 6: Run the covering tests, typecheck, and the full suite**
-
-Run: `npx vitest run test/auth/hermesAuth.test.ts test/login/loginServer.test.ts`
-Then: `npm run typecheck` and `npx vitest run`
-Expected: all clean; suite green apart from the known `test/logging.test.ts` line.
-
-- [ ] **Step 7: Rebuild and eyeball the three screens**
-
-Run: `npm run build`
-Then start the login CLI and, without completing a login, fetch each screen's HTML to confirm it renders and carries the expected copy:
+- [ ] **Step 7: Build and confirm each screen renders**
 
 ```bash
+npm run build
 node dist/login.js &
-# from the port it prints on stderr:
-curl -s http://127.0.0.1:<port>/ | grep -E "Welcome back to|Login"
-curl -s -X POST http://127.0.0.1:<port>/request-otp -H "Content-Type: application/json" -d '{"email":"you@example.com"}' | grep -cE 'class="otp"|maxlength="1"'
+# use the port it prints on stderr:
+curl -s http://127.0.0.1:<port>/ | grep -cE 'Welcome back to|name="email"|Figtree'
+curl -s -X POST http://127.0.0.1:<port>/request-otp \
+  -H "Content-Type: application/json" -d '{"email":"you@example.com"}' \
+  | grep -cE 'maxlength="1"'
 ```
 
-The second command should report 9 matches (the container plus eight boxes). Kill the process afterwards. Paste both outputs in your report. Do not attempt a real login — it would email a code to a real address.
+The first should report 3, the second 8. Kill the process afterwards. Paste both
+outputs. **Do not complete a real login** — it emails a code to a real address.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/auth/hermesAuth.ts src/login/loginPage.ts src/login/loginServer.ts test/auth/hermesAuth.test.ts test/login/loginServer.test.ts
-git commit -m "fix: take the store list from the refresh response and restyle the login to match the Dashboard"
+git add src/login/loginPage.ts test/login/loginServer.test.ts
+git commit -m "feat: restyle the login screens to match the Dashboard"
 ```
