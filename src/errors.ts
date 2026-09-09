@@ -45,6 +45,21 @@ export class MissingCredentialsError extends Error {
   }
 }
 
+/**
+ * A path parameter that cannot be safely substituted into an allowlisted path
+ * template. Visible to the caller on purpose: either they passed a value that
+ * would steer the request off the allowlisted path (a dot-only segment, which
+ * `new URL()` resolves away), or a live schema refresh dropped a path
+ * parameter and left its placeholder unsubstituted. Both are correctable, and
+ * neither may be allowed to reach Hermes.
+ */
+export class InvalidPathParameterError extends Error {
+  constructor(readonly pathTemplate: string, readonly detail: string) {
+    super(`Refusing to call ${pathTemplate}: ${detail}`);
+    this.name = "InvalidPathParameterError";
+  }
+}
+
 export class MissingOperationError extends Error {
   constructor(readonly toolName: string, readonly method: string, readonly pathTemplate: string) {
     super(`${toolName}: ${method.toUpperCase()} ${pathTemplate} is not present in the OpenAPI spec`);
@@ -66,6 +81,7 @@ const KNOWN_ERROR_CODES: [new (...args: never[]) => Error, string][] = [
   [HermesRejectedError, "REJECTED"],
   [HermesUnavailableError, "UNAVAILABLE"],
   [MissingCredentialsError, "MISSING_CREDENTIALS"],
+  [InvalidPathParameterError, "INVALID_PATH_PARAM"],
 ];
 
 /**

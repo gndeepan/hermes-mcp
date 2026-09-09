@@ -9,7 +9,12 @@ import { ENDPOINTS } from "../registry/endpoints.js";
 import type { Credentials, HermesRequester } from "../hermesClient.js";
 import type { TokenManager } from "../auth/tokenManager.js";
 import { fetchOpenApiDoc } from "../openapiSync.js";
-import { HermesUnauthenticatedError, toToolResult, type ToolResult } from "../errors.js";
+import {
+  HermesUnauthenticatedError,
+  InvalidPathParameterError,
+  toToolResult,
+  type ToolResult,
+} from "../errors.js";
 
 export interface ToolContext {
   config: HermesMcpConfig;
@@ -25,6 +30,33 @@ interface BuiltRequest {
   body?: unknown;
 }
 
+/**
+ * A dot-only path-param value survives `encodeURIComponent` untouched, and
+ * `new URL(path, base)` in `HermesClient` then applies RFC-3986 dot-segment
+ * removal — so `storeId: ".."` turns `/api/v1/stores/{storeId}/custom-blocks`
+ * into `/api/v1/custom-blocks`, an operation this server never allowlisted
+ * (hard constraint #3). Dots are legal inside real Hermes ids, so only a value
+ * consisting *entirely* of dots is refused.
+ */
+const DOT_ONLY = /^\.+$/;
+const UNSUBSTITUTED_PLACEHOLDER = /\{[^}]+\}/;
+
+/**
+ * The single check standing between caller input and the wire. Runs once, after
+ * substitution, and covers both ways a path can stop being the allowlisted one:
+ * a value that resolves the path away, and a placeholder left behind because a
+ * live refresh dropped the parameter that used to fill it.
+ */
+const assertAllowlistedPath = (compiled: CompiledEndpoint, path: string): void => {
+  const leftover = UNSUBSTITUTED_PLACEHOLDER.exec(path);
+  if (leftover) {
+    throw new InvalidPathParameterError(
+      compiled.pathTemplate,
+      `the path parameter ${leftover[0]} is not declared by the current OpenAPI schema for this operation, so it cannot be filled in`
+    );
+  }
+};
+
 const buildRequest = (compiled: CompiledEndpoint, args: Record<string, unknown>): BuiltRequest => {
   let path = compiled.pathTemplate;
   const query: Record<string, string> = {};
@@ -32,11 +64,19 @@ const buildRequest = (compiled: CompiledEndpoint, args: Record<string, unknown>)
     const value = args[name];
     if (value === undefined) continue;
     if (location === "path") {
-      path = path.replace(`{${name}}`, encodeURIComponent(String(value)));
+      const raw = String(value);
+      if (DOT_ONLY.test(raw)) {
+        throw new InvalidPathParameterError(
+          compiled.pathTemplate,
+          `"${name}" must not be a dot-only value like "." or ".." — it would resolve the request onto a different, non-allowlisted path`
+        );
+      }
+      path = path.replace(`{${name}}`, encodeURIComponent(raw));
     } else {
       query[name] = String(value);
     }
   }
+  assertAllowlistedPath(compiled, path);
   return { path, query, body: compiled.hasBody ? args.body : undefined };
 };
 

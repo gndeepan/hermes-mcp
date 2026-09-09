@@ -6,6 +6,7 @@ import {
   HermesRejectedError,
   HermesUnauthenticatedError,
   HermesUnavailableError,
+  InvalidPathParameterError,
   MissingCredentialsError,
   MissingOperationError,
   errorMessage,
@@ -29,6 +30,7 @@ describe("toToolResult", () => {
     [new HermesRejectedError("/x", 422, "bad body"), "REJECTED"],
     [new HermesUnavailableError("/x", new Error("down")), "UNAVAILABLE"],
     [new MissingCredentialsError(), "MISSING_CREDENTIALS"],
+    [new InvalidPathParameterError("/api/v1/stores/{storeId}", 'bad "storeId"'), "INVALID_PATH_PARAM"],
   ];
 
   it.each(cases)("maps %s to a visible, coded tool result", (error, code) => {

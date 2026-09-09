@@ -295,6 +295,59 @@ describe("registerHermesTools", () => {
     expect(parsed.changed).toContain("hermes_get_widget");
   });
 
+  it.each(["..", ".", "..."])(
+    "refuses %s as a path param instead of issuing a truncated path",
+    async (storeId) => {
+      const request = vi.fn(async () => ({ id: "cb1" }));
+      const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
+
+      const result = await client.callTool({
+        name: "hermes_create_custom_block",
+        arguments: { storeId, body: { name: "n" } },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain("INVALID_PATH_PARAM");
+      expect(request).not.toHaveBeenCalled();
+    }
+  );
+
+  it("keeps a literal {placeholder} value inside its own path segment", async () => {
+    const request = vi.fn(async () => ({ items: [] }));
+    const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
+
+    await client.callTool({
+      name: "hermes_list_custom_blocks",
+      arguments: { storeId: "{storeId}", page: 1 },
+    });
+
+    const [, calledPath] = request.mock.calls[0] as unknown as [string, string];
+    expect(calledPath).toBe("/api/v1/stores/%7BstoreId%7D/custom-blocks");
+    expect(calledPath).not.toMatch(/\{[^}]+\}/);
+    expect(calledPath.endsWith("/custom-blocks")).toBe(true);
+  });
+
+  it("never issues a request whose path still holds an unsubstituted placeholder", async () => {
+    const request = vi.fn(async () => ({ id: "w1" }));
+    const ctx = baseCtx({ createClient: () => ({ request }) });
+    const { client, syncToolSchemas } = await buildWithSync(ctx);
+
+    // A live refresh in which hermes_update_widget lost its `id` path param.
+    const doc = loadSnapshotDoc();
+    doc.paths["/api/v1/widgets/{id}"].put!.parameters = [];
+    ctx.registry.refresh(doc, ctx.logger);
+    syncToolSchemas();
+
+    const result = await client.callTool({
+      name: "hermes_update_widget",
+      arguments: { body: { display: true } },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("INVALID_PATH_PARAM");
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it("hermes_refresh_openapi surfaces a fetch failure as an error result", async () => {
     vi.stubGlobal(
       "fetch",
