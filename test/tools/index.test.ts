@@ -10,6 +10,7 @@ import { loadConfig } from "../../src/config.js";
 import { TokenManager } from "../../src/auth/tokenManager.js";
 import type { StoredCredentials, TokenStore } from "../../src/auth/tokenStore.js";
 import type { HermesRequester } from "../../src/hermesClient.js";
+import type { OpenApiDocument } from "../../src/registry/schemaFromOpenApi.js";
 import { HermesNotFoundError, HermesUnauthenticatedError } from "../../src/errors.js";
 
 afterEach(() => {
@@ -45,6 +46,35 @@ const baseCtx = (overrides: Partial<ToolContext> = {}): ToolContext => ({
 
 const textOf = (result: Awaited<ReturnType<Client["callTool"]>>): string =>
   (result.content as { text: string }[])[0]?.text ?? "";
+
+/** Like `buildServerAndClient`, but also hands back the schema-sync function. */
+const buildWithSync = async (
+  ctx: ToolContext
+): Promise<{ client: Client; syncToolSchemas: () => string[] }> => {
+  const server = new McpServer({ name: "test", version: "0.0.0" });
+  const syncToolSchemas = registerHermesTools(server, ctx);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test-client", version: "0.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  return { client, syncToolSchemas };
+};
+
+const advertisedSchema = async (client: Client, name: string): Promise<Record<string, unknown>> => {
+  const tool = (await client.listTools()).tools.find((t) => t.name === name);
+  if (!tool) throw new Error(`tool ${name} not advertised`);
+  return tool.inputSchema as unknown as Record<string, unknown>;
+};
+
+/** The snapshot, with `hermes_get_widget` having gained a required query param. */
+const docWithNewRequiredWidgetParam = (): OpenApiDocument => {
+  const doc = loadSnapshotDoc();
+  const operation = doc.paths["/api/v1/widgets/{id}"].get!;
+  operation.parameters = [
+    ...(operation.parameters ?? []),
+    { name: "revision", in: "query", required: true, schema: { type: "string" } },
+  ];
+  return doc;
+};
 
 describe("registerHermesTools", () => {
   it("registers every allowlisted tool plus hermes_refresh_openapi", async () => {
@@ -209,6 +239,59 @@ describe("registerHermesTools", () => {
     expect(result.isError).toBeFalsy();
     const parsed = JSON.parse(textOf(result)) as { refreshed: number; changed: string[] };
     expect(parsed.refreshed).toBe(ENDPOINTS.length);
+    expect(parsed.changed).toContain("hermes_get_widget");
+  });
+
+  it("re-advertises a newly required param to the client and lets a call carry it through", async () => {
+    const request = vi.fn(async () => ({ id: "w1" }));
+    const ctx = baseCtx({ createClient: () => ({ request }) });
+    const { client, syncToolSchemas } = await buildWithSync(ctx);
+
+    const before = await advertisedSchema(client, "hermes_get_widget");
+    expect(Object.keys((before.properties ?? {}) as object)).not.toContain("revision");
+
+    ctx.registry.refresh(docWithNewRequiredWidgetParam(), ctx.logger);
+    expect(syncToolSchemas()).toContain("hermes_get_widget");
+
+    const after = await advertisedSchema(client, "hermes_get_widget");
+    expect(Object.keys((after.properties ?? {}) as object)).toContain("revision");
+    expect(after.required).toContain("revision");
+
+    const result = await client.callTool({
+      name: "hermes_get_widget",
+      arguments: { id: "w1", revision: "v2" },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(request).toHaveBeenCalledWith("get", "/api/v1/widgets/w1", {
+      query: { revision: "v2" },
+      body: undefined,
+    });
+  });
+
+  it("reports no change and re-advertises nothing when a refresh brings an identical document", async () => {
+    const ctx = baseCtx();
+    const { syncToolSchemas } = await buildWithSync(ctx);
+    ctx.registry.refresh(loadSnapshotDoc(), ctx.logger);
+    expect(syncToolSchemas()).toEqual([]);
+  });
+
+  it("hermes_refresh_openapi counts a param whose type changed as changed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const doc = loadSnapshotDoc();
+        doc.paths["/api/v1/widgets/{id}"].get!.parameters = [
+          { name: "id", in: "path", required: true, schema: { type: "integer" } },
+        ];
+        return new Response(JSON.stringify(doc), { status: 200 });
+      })
+    );
+    const client = await buildServerAndClient(baseCtx());
+
+    const result = await client.callTool({ name: "hermes_refresh_openapi", arguments: {} });
+
+    const parsed = JSON.parse(textOf(result)) as { changed: string[] };
     expect(parsed.changed).toContain("hermes_get_widget");
   });
 

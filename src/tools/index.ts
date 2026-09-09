@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import * as z from "zod";
-import type { McpServer } from "@modelcontextprotocol/server";
+import type { McpServer, RegisteredTool } from "@modelcontextprotocol/server";
 import type { Logger } from "../logging.js";
 import type { HermesMcpConfig } from "../config.js";
 import type { SchemaRegistry } from "../registry/schemaRegistry.js";
@@ -80,7 +80,33 @@ const wrap =
 
 const REFRESH_TOOL = "hermes_refresh_openapi";
 
-const registerRefreshTool = (server: McpServer, ctx: ToolContext): void => {
+/**
+ * Re-advertises every allowlisted tool's input schema from the registry and
+ * returns the names whose advertised schema genuinely changed.
+ *
+ * `SchemaRegistry.refresh` only replaces entries in its own map; the MCP server
+ * holds whatever schema it was handed at registration. Without this, a live
+ * refresh changes nothing a client can see — `tools/list` keeps advertising the
+ * startup schema and the SDK keeps validating calls against it, so a
+ * newly-required param is stripped before it can reach `buildRequest`.
+ */
+export type SyncToolSchemas = () => string[];
+
+/**
+ * The comparand for "did this schema change". `z.toJSONSchema` renders the
+ * whole compiled shape — param names, types, enums, descriptions and
+ * required-ness — so a change to any of them is caught, unlike the
+ * `paramLocations`-only diff this replaces (which saw a param's location but
+ * not its type, enum, or optionality).
+ */
+const schemaFingerprint = (compiled: CompiledEndpoint): string =>
+  JSON.stringify(z.toJSONSchema(compiled.inputSchema, { io: "input" }));
+
+const registerRefreshTool = (
+  server: McpServer,
+  ctx: ToolContext,
+  syncToolSchemas: SyncToolSchemas
+): void => {
   server.registerTool(
     REFRESH_TOOL,
     {
@@ -90,39 +116,59 @@ const registerRefreshTool = (server: McpServer, ctx: ToolContext): void => {
     },
     (async (): Promise<ToolReturn> => {
       const traceId = randomBytes(4).toString("hex");
-      const before = new Map(
-        ctx.registry.list().map((entry) => [entry.toolName, JSON.stringify(entry.paramLocations)])
-      );
+      let changed: string[];
+      let refreshed: number;
       try {
         const doc = await fetchOpenApiDoc(ctx.config.openApiDocsUrl, ctx.config.openApiFetchTimeoutMs);
         ctx.registry.refresh(doc, ctx.logger);
+        changed = syncToolSchemas();
+        refreshed = ctx.registry.list().length;
       } catch (err) {
         return toToolResult(err, ctx.logger, REFRESH_TOOL);
       }
-      const entries = ctx.registry.list();
-      const changed = entries
-        .filter((entry) => JSON.stringify(entry.paramLocations) !== before.get(entry.toolName))
-        .map((entry) => entry.toolName);
       ctx.logger.info("openapi schema refreshed on demand", {
         traceId,
-        refreshed: entries.length,
+        refreshed,
         changed: changed.length,
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify({ refreshed: entries.length, changed }) }],
-      };
+      return { content: [{ type: "text", text: JSON.stringify({ refreshed, changed }) }] };
     }) as Parameters<typeof server.registerTool>[2]
   );
 };
 
-export const registerHermesTools = (server: McpServer, ctx: ToolContext): void => {
+export const registerHermesTools = (server: McpServer, ctx: ToolContext): SyncToolSchemas => {
+  const handles = new Map<string, RegisteredTool>();
+  /** Fingerprint of the schema each tool is *currently advertising*, not the registry's. */
+  const advertised = new Map<string, string>();
+
   for (const definition of ENDPOINTS) {
     const compiled = ctx.registry.get(definition.toolName);
-    server.registerTool(
+    handles.set(
       definition.toolName,
-      { description: definition.description, inputSchema: compiled.inputSchema },
-      wrap(definition.toolName, definition.method, ctx) as Parameters<typeof server.registerTool>[2]
+      server.registerTool(
+        definition.toolName,
+        { description: definition.description, inputSchema: compiled.inputSchema },
+        wrap(definition.toolName, definition.method, ctx) as Parameters<typeof server.registerTool>[2]
+      )
     );
+    advertised.set(definition.toolName, schemaFingerprint(compiled));
   }
-  registerRefreshTool(server, ctx);
+
+  const syncToolSchemas: SyncToolSchemas = () => {
+    const changed: string[] = [];
+    for (const definition of ENDPOINTS) {
+      const compiled = ctx.registry.get(definition.toolName);
+      const fingerprint = schemaFingerprint(compiled);
+      if (fingerprint === advertised.get(definition.toolName)) continue;
+      advertised.set(definition.toolName, fingerprint);
+      // Assigns the new input schema, regenerates the SDK's validating
+      // executor, and notifies connected clients via tools/list_changed.
+      handles.get(definition.toolName)?.update({ paramsSchema: compiled.inputSchema });
+      changed.push(definition.toolName);
+    }
+    return changed;
+  };
+
+  registerRefreshTool(server, ctx, syncToolSchemas);
+  return syncToolSchemas;
 };

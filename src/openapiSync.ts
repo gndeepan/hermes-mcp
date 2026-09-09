@@ -29,16 +29,23 @@ export interface RefreshLoopConfig {
  * schemas. This single loop covers both the spec's "startup fallback" and
  * "steady-state fallback" cases — startup is simply the loop's first tick,
  * fired synchronously rather than waiting for the interval.
+ *
+ * `onRefreshed` runs after each *successful* `registry.refresh`. Refreshing the
+ * registry is only half the job: the caller uses this hook to re-advertise the
+ * new schemas to connected MCP clients, without which a background refresh
+ * changes nothing anyone can observe.
  */
 export const startOpenApiRefreshLoop = (
   registry: SchemaRegistry,
   config: RefreshLoopConfig,
-  logger: Logger
+  logger: Logger,
+  onRefreshed?: () => void
 ): (() => void) => {
   const refreshOnce = (): void => {
     fetchOpenApiDoc(config.openApiDocsUrl, config.openApiFetchTimeoutMs)
       .then((doc) => {
         registry.refresh(doc, logger);
+        onRefreshed?.();
         logger.info("openapi schema refresh ok");
       })
       .catch((err) => {

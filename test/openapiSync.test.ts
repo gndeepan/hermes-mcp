@@ -43,6 +43,47 @@ describe("startOpenApiRefreshLoop", () => {
     stop();
   });
 
+  it("invokes onRefreshed after a successful refresh so the new schemas get re-advertised", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(loadSnapshotDoc()), { status: 200 }))
+    );
+    const registry = SchemaRegistry.fromDocument(loadSnapshotDoc());
+    const onRefreshed = vi.fn();
+
+    const stop = startOpenApiRefreshLoop(
+      registry,
+      { openApiDocsUrl: "https://hermes.test/v3/api-docs", openApiFetchTimeoutMs: 1000, openApiRefreshIntervalS: 900 },
+      createLogger({ logLevel: "silent" }),
+      onRefreshed
+    );
+    await vi.waitFor(() => expect(onRefreshed).toHaveBeenCalledTimes(1));
+    stop();
+  });
+
+  it("does not invoke onRefreshed when the fetch fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("network down");
+      })
+    );
+    const registry = SchemaRegistry.fromDocument(loadSnapshotDoc());
+    const logger = createLogger({ logLevel: "silent" });
+    const warnSpy = vi.spyOn(logger, "warn");
+    const onRefreshed = vi.fn();
+
+    const stop = startOpenApiRefreshLoop(
+      registry,
+      { openApiDocsUrl: "https://hermes.test/v3/api-docs", openApiFetchTimeoutMs: 1000, openApiRefreshIntervalS: 900 },
+      logger,
+      onRefreshed
+    );
+    await vi.waitFor(() => expect(warnSpy).toHaveBeenCalled());
+    expect(onRefreshed).not.toHaveBeenCalled();
+    stop();
+  });
+
   it("logs a warning and keeps going when the fetch fails", async () => {
     vi.stubGlobal(
       "fetch",

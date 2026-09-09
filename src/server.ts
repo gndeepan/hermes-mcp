@@ -42,15 +42,23 @@ export const createServer = (
   tokenManager: TokenManager = buildTokenManager(config)
 ): McpServer => {
   const registry = SchemaRegistry.fromDocument(loadSnapshotDoc());
-  startOpenApiRefreshLoop(registry, config, logger);
-
   const server = new McpServer({ name: config.serverName, version: config.serverVersion });
-  registerHermesTools(server, {
+
+  // Order matters: the tools must be registered before the refresh loop starts,
+  // so the loop has a sync function to push refreshed schemas through.
+  const syncToolSchemas = registerHermesTools(server, {
     config,
     logger,
     tokenManager,
     registry,
     createClient: (credentials) => new HermesClient(config.hermesBaseUrl, credentials),
+  });
+
+  startOpenApiRefreshLoop(registry, config, logger, () => {
+    const changed = syncToolSchemas();
+    if (changed.length > 0) {
+      logger.info("re-advertised refreshed tool schemas", { changed });
+    }
   });
 
   logger.info("server ready", { tools: ENDPOINTS.length + 1 });
