@@ -91,15 +91,42 @@ describe("an end-to-end call through the real TokenManager and HermesClient", ()
 });
 
 describe("stdout discipline", () => {
-  it("has no console.log or process.stdout.write anywhere under src/", () => {
-    const stripComments = (source: string) =>
-      source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  /**
+   * stdout is the MCP protocol transport, so anything written there corrupts
+   * the stream for every client. On Node all of these console methods go to
+   * stdout, not just `console.log`. Comments are deliberately *not* stripped:
+   * a `console.log` inside a comment is a false positive a human clears in
+   * seconds, whereas a false negative silently breaks the protocol.
+   */
+  const STDOUT_WRITERS =
+    /console\.(log|info|debug|dir|table|group|groupEnd|groupCollapsed|count|countReset|timeLog|profile)\b|process\.stdout/;
+
+  it("has no stdout-writing call anywhere under src/", () => {
     const files = readdirSync("src", { recursive: true, encoding: "utf8" })
       .filter((f) => f.endsWith(".ts"))
       .map((f) => join("src", f));
-    const offenders = files.filter((f) =>
-      /console\.log|process\.stdout/.test(stripComments(readFileSync(f, "utf8")))
-    );
+
+    expect(files.length).toBeGreaterThan(5);
+    const offenders = files.filter((f) => STDOUT_WRITERS.test(readFileSync(f, "utf8")));
     expect(offenders).toEqual([]);
+  });
+
+  it.each([
+    "console.log('x')",
+    "console.info('x')",
+    "console.debug('x')",
+    "console.dir(x)",
+    "console.table(x)",
+    "console.group('x')",
+    "console.count('x')",
+    "process.stdout.write('x')",
+  ])("flags %s", (source) => {
+    expect(STDOUT_WRITERS.test(source)).toBe(true);
+  });
+
+  it("leaves stderr-writing calls alone", () => {
+    expect(STDOUT_WRITERS.test("console.error('x')")).toBe(false);
+    expect(STDOUT_WRITERS.test("console.warn('x')")).toBe(false);
+    expect(STDOUT_WRITERS.test("process.stderr.write('x')")).toBe(false);
   });
 });

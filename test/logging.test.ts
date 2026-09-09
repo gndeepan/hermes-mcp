@@ -16,12 +16,18 @@ describe("createLogger", () => {
     expect(JSON.parse(lines[1]).message).toBe("error message");
   });
 
-  it("never writes to stdout", () => {
-    const spy = vi.spyOn(process.stdout, "write");
+  it("writes to stderr and never to stdout", () => {
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const logger = createLogger({ logLevel: "debug" });
+
     logger.info("hello");
-    expect(spy).not.toHaveBeenCalled();
-    spy.mockRestore();
+
+    expect(stderr).toHaveBeenCalledTimes(1);
+    expect(String(stderr.mock.calls[0][0])).toContain("hello");
+    expect(stdout).not.toHaveBeenCalled();
+    stdout.mockRestore();
+    stderr.mockRestore();
   });
 
   it("redacts a token-shaped field even if a caller passes one by mistake", () => {
@@ -32,6 +38,40 @@ describe("createLogger", () => {
     expect(parsed.authorization).toBe("[REDACTED]");
     expect(parsed.accessToken).toBe("[REDACTED]");
     expect(parsed.other).toBe("fine");
+  });
+
+  it("redacts a credential-shaped key nested inside another object", () => {
+    const lines: string[] = [];
+    const logger = createLogger({ logLevel: "debug" }, (line) => lines.push(line));
+
+    logger.debug("tool call start", {
+      tool: "hermes_get_widget",
+      query: { page: "1", accessToken: "secret", nested: { refreshToken: "deeper" } },
+      items: [{ token: "in-an-array" }],
+    });
+
+    const parsed = JSON.parse(lines[0]) as Record<string, never>;
+    expect(parsed.query).toEqual({
+      page: "1",
+      accessToken: "[REDACTED]",
+      nested: { refreshToken: "[REDACTED]" },
+    });
+    expect(parsed.items).toEqual([{ token: "[REDACTED]" }]);
+    expect(lines[0]).not.toContain("secret");
+    expect(lines[0]).not.toContain("deeper");
+    expect(lines[0]).not.toContain("in-an-array");
+  });
+
+  it("survives a cyclic meta object without recursing forever", () => {
+    const lines: string[] = [];
+    const logger = createLogger({ logLevel: "debug" }, (line) => lines.push(line));
+    const cyclic: Record<string, unknown> = { token: "secret" };
+    cyclic.self = cyclic;
+
+    logger.info("cycle", { cyclic });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain("secret");
   });
 
   it("writes silent level as nothing at all", () => {
