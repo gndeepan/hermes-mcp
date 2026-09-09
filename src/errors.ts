@@ -36,6 +36,20 @@ export class HermesUnavailableError extends Error {
   }
 }
 
+/**
+ * A non-2xx from one of Hermes's own auth endpoints. Carries the status so
+ * callers can tell a rejected credential (401/403 — no token will work until a
+ * fresh login) from a transport-level or server-side failure that says nothing
+ * about the credential. Names only the path: the request that produced it may
+ * have carried an OTP or a refresh token.
+ */
+export class HermesAuthError extends Error {
+  constructor(readonly path: string, readonly status: number) {
+    super(`Hermes ${path} failed with status ${status}`);
+    this.name = "HermesAuthError";
+  }
+}
+
 export class MissingCredentialsError extends Error {
   constructor() {
     super(

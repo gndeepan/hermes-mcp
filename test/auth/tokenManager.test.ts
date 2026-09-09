@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { TokenManager } from "../../src/auth/tokenManager.js";
 import type { StoredCredentials, TokenStore } from "../../src/auth/tokenStore.js";
-import { MissingCredentialsError } from "../../src/errors.js";
+import { HermesAuthError, HermesUnavailableError, MissingCredentialsError } from "../../src/errors.js";
 
 const fakeStore = (
   initial: StoredCredentials | null = null
@@ -109,13 +109,60 @@ describe("TokenManager", () => {
     expect(refresh).toHaveBeenCalledTimes(1);
   });
 
-  it("throws MissingCredentialsError and stops retrying once the refresh itself fails", async () => {
+  it("throws MissingCredentialsError and stops retrying once the refresh is rejected with a 401", async () => {
     const refresh = vi.fn(async () => {
-      throw new Error("Hermes /api/v1/auth/refresh failed with status 401");
+      throw new HermesAuthError("/api/v1/auth/refresh", 401);
     });
     const manager = new TokenManager(
       { store: fakeStore(), baseUrl: "https://hermes.test", now: at(1_000_000), refresh },
       { accessToken: "a", refreshToken: "expired", expiresAt: 1_000_000 + 10_000, storeId: "s1" }
+    );
+
+    await expect(manager.getValidCredentials()).rejects.toThrow(MissingCredentialsError);
+    await expect(manager.getValidCredentials()).rejects.toThrow(MissingCredentialsError);
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the credentials usable after a transport failure, so a later call still succeeds", async () => {
+    const store = fakeStore();
+    let attempt = 0;
+    const refresh = vi.fn(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new TypeError("fetch failed");
+      return { accessToken: "a2", refreshToken: "r2", expiresAt: 2_000_000_000_000 };
+    });
+    const manager = new TokenManager(
+      { store, baseUrl: "https://hermes.test", now: at(1_000_000), refresh },
+      { accessToken: "a", refreshToken: "r1", expiresAt: 1_000_000 + 10_000, storeId: "s1" }
+    );
+
+    await expect(manager.getValidCredentials()).rejects.toThrow(HermesUnavailableError);
+    expect(await manager.getValidCredentials()).toEqual({ accessToken: "a2", storeId: "s1" });
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(refresh).toHaveBeenLastCalledWith("https://hermes.test", "r1");
+  });
+
+  it("keeps the credentials after a 5xx refresh failure and reports unavailability", async () => {
+    const refresh = vi.fn(async () => {
+      throw new HermesAuthError("/api/v1/auth/refresh", 502);
+    });
+    const manager = new TokenManager(
+      { store: fakeStore(), baseUrl: "https://hermes.test", now: at(1_000_000), refresh },
+      { accessToken: "a", refreshToken: "r1", expiresAt: 1_000_000 + 10_000, storeId: "s1" }
+    );
+
+    await expect(manager.getValidCredentials()).rejects.toThrow(HermesUnavailableError);
+    await expect(manager.getValidCredentials()).rejects.toThrow(HermesUnavailableError);
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears the credentials when the refresh is rejected with a 403", async () => {
+    const refresh = vi.fn(async () => {
+      throw new HermesAuthError("/api/v1/auth/refresh", 403);
+    });
+    const manager = new TokenManager(
+      { store: fakeStore(), baseUrl: "https://hermes.test", now: at(1_000_000), refresh },
+      { accessToken: "a", refreshToken: "r1", expiresAt: 1_000_000 + 10_000, storeId: "s1" }
     );
 
     await expect(manager.getValidCredentials()).rejects.toThrow(MissingCredentialsError);

@@ -1,10 +1,12 @@
-import { MissingCredentialsError } from "../errors.js";
+import { HermesAuthError, HermesUnavailableError, MissingCredentialsError } from "../errors.js";
 import type { Credentials } from "../hermesClient.js";
 import { refreshAccessToken } from "./hermesAuth.js";
 import { normalizeExpiresAt, type StoredCredentials, type TokenStore } from "./tokenStore.js";
 
 /** Refresh this far ahead of the recorded expiry, to absorb clock skew and latency. */
 const EXPIRY_SKEW_MS = 60_000;
+
+const REFRESH_PATH = "/api/v1/auth/refresh";
 
 export interface TokenManagerDeps {
   store: TokenStore;
@@ -49,12 +51,18 @@ export class TokenManager {
     let refreshed: { accessToken: string; refreshToken: string; expiresAt: number };
     try {
       refreshed = await this.refresh(this.baseUrl, previous.refreshToken);
-    } catch {
-      // A refresh token Hermes will not honour means no token will work until a
-      // fresh login. Drop it so later calls fail fast instead of re-hammering
-      // the refresh endpoint on every tool call.
-      this.current = null;
-      throw new MissingCredentialsError();
+    } catch (err) {
+      // A refresh token Hermes actively *rejects* means no token will work
+      // until a fresh login. Drop it so later calls fail fast instead of
+      // re-hammering the refresh endpoint on every tool call.
+      if (err instanceof HermesAuthError && (err.status === 401 || err.status === 403)) {
+        this.current = null;
+        throw new MissingCredentialsError();
+      }
+      // Anything else — DNS blip, timeout, 502 — says nothing about the stored
+      // credentials, so they stay. One transient hiccup at the expiry boundary
+      // must not log the process out until a human restarts it.
+      throw new HermesUnavailableError(REFRESH_PATH, err);
     }
 
     const next: StoredCredentials = {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { refreshAccessToken, sendEmailOtp, storeLogin, webLogin } from "../../src/auth/hermesAuth.js";
+import { HermesAuthError } from "../../src/errors.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -125,5 +126,32 @@ describe("refreshAccessToken", () => {
   it("throws on a non-2xx status", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 401 })));
     await expect(refreshAccessToken("https://hermes.test", "bad")).rejects.toThrow(/401/);
+  });
+});
+
+describe("postJson error typing and timeout", () => {
+  it("throws a HermesAuthError carrying the HTTP status, naming only the path", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 502 })));
+
+    const error = await refreshAccessToken("https://hermes.test", "r1").catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(HermesAuthError);
+    expect((error as HermesAuthError).status).toBe(502);
+    expect((error as HermesAuthError).path).toBe("/api/v1/auth/refresh");
+    expect(String(error)).not.toContain("r1");
+  });
+
+  it("passes an abort signal so a hung Hermes cannot hang the caller forever", async () => {
+    const fetchMock = vi.fn(async (_url: URL, init: RequestInit) => {
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+      expect(init.signal?.aborted).toBe(false);
+      return new Response(JSON.stringify({ accessToken: "a", refreshToken: "r", expiresAt: 1 }), {
+        status: 200,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await refreshAccessToken("https://hermes.test", "r1");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

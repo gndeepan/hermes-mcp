@@ -1,3 +1,12 @@
+import { HermesAuthError } from "../errors.js";
+
+/**
+ * Matches `HermesClient`'s own transport timeout. Without one, a hung
+ * `/auth/refresh` hangs a tool call through the whole MCP chain, and a hung
+ * `/auth/web` hangs `npm run login` with no output at all.
+ */
+const AUTH_TIMEOUT_MS = 20_000;
+
 export interface LoginStore {
   id: string;
   name: string;
@@ -26,14 +35,22 @@ const unwrap = <T>(payload: unknown): T =>
     : payload) as T;
 
 const postJson = async (url: URL, body: unknown, headers: Record<string, string> = {}): Promise<unknown> => {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json", ...headers },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AUTH_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json", ...headers },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!response.ok) {
     // Names only the path and status: the Authorization header carries the OTP.
-    throw new Error(`Hermes ${url.pathname} failed with status ${response.status}`);
+    throw new HermesAuthError(url.pathname, response.status);
   }
   return response.json();
 };
