@@ -125,6 +125,9 @@ describe("startLoginServer", () => {
     await postJson(server.port, "/verify-otp", { email: "me@x.com", otp: "123456" });
 
     expect(store.written).toHaveLength(0);
+    // Nothing will retry the failed registration for us, and login.ts is already awaiting
+    // completion — the CLI must not be left hanging.
+    await expect(server.waitForCompletion()).resolves.toBe(false);
   });
 
   it("persists credentials and completes when the login returns exactly one store", async () => {

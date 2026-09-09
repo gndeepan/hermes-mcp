@@ -61,6 +61,25 @@ export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> =>
     });
   };
 
+  // Registers + persists, then settles the completion promise either way — success or
+  // failure. A storeLogin failure (network blip, a 403, a 500) is treated as terminal
+  // rather than retryable: nothing here will retry it for us, and login.ts is already
+  // awaiting completion, so leaving it unsettled would hang the CLI forever.
+  const finish = async (res: http.ServerResponse, storeId: string): Promise<void> => {
+    try {
+      await registerAndPersist(storeId);
+    } catch (err) {
+      html(res, 502, renderEmailForm(
+        `Could not register store "${storeId}" with Hermes: ${err instanceof Error ? err.message : String(err)}. ` +
+          `Please run the login command again.`
+      ));
+      settle(false);
+      return;
+    }
+    html(res, 200, renderDone());
+    settle(true);
+  };
+
   const server = http.createServer((req, res) => {
     void (async () => {
       try {
@@ -105,16 +124,12 @@ export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> =>
               settle(false);
               return;
             }
-            await registerAndPersist(deps.presetStoreId);
-            html(res, 200, renderDone());
-            settle(true);
+            await finish(res, deps.presetStoreId);
             return;
           }
 
           if (result.stores.length === 1) {
-            await registerAndPersist(result.stores[0].id);
-            html(res, 200, renderDone());
-            settle(true);
+            await finish(res, result.stores[0].id);
             return;
           }
 
@@ -128,9 +143,7 @@ export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> =>
             html(res, 400, renderEmailForm("Log in again."));
             return;
           }
-          await registerAndPersist(body.storeId);
-          html(res, 200, renderDone());
-          settle(true);
+          await finish(res, body.storeId);
           return;
         }
 

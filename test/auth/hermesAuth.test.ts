@@ -59,6 +59,28 @@ describe("webLogin", () => {
     expect(error).toBeInstanceOf(Error);
     expect(String(error)).not.toContain("123456");
   });
+
+  it("reads an unenveloped response body too", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              userId: "u1",
+              accessToken: "a",
+              refreshToken: "r",
+              expiresAt: 1_800_000_000,
+              isAdmin: false,
+              stores: [],
+            }),
+            { status: 200 }
+          )
+      )
+    );
+    const result = await webLogin("https://hermes.test", "me@x.com", "123456");
+    expect(result.accessToken).toBe("a");
+  });
 });
 
 describe("storeLogin", () => {
