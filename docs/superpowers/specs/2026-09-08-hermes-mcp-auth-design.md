@@ -212,10 +212,14 @@ call-outcome handling.
 ### `hermes_refresh_openapi` (new 12th tool, in `src/tools/index.ts`)
 
 No input. Calls the exact `fetchOpenApiDoc` + `registry.refresh()` the base spec
-already built for the background interval, and returns which of the 11 tool
-schemas actually changed (compare each `CompiledEndpoint.paramLocations`
-before/after) versus which failed to refresh (already logged by `refresh()`
-itself). Purely additive — it does not replace the interval, which keeps running.
+already built for the background interval, then re-advertises the refreshed
+schemas to the client (see the base spec's "Re-advertising"), and returns which
+of the 11 tool schemas actually changed versus which failed to refresh (already
+logged by `refresh()` itself). "Changed" compares the whole compiled input
+schema, rendered with `z.toJSONSchema(inputSchema, { io: "input" })` — not just
+`CompiledEndpoint.paramLocations`, which would see a param's location but miss a
+change to its type, enum, or required-ness. Purely additive — it does not
+replace the interval, which keeps running.
 
 ### Tracing
 
@@ -242,11 +246,23 @@ spec's hard constraint #4.
 - `webLogin`/`refreshAccessToken` network failure or non-200 → the login CLI
   prints the error and exits non-zero; the browser page shows a plain error
   message with no retry loop (re-running the CLI is the retry).
-- A refresh that itself gets a 401 (refresh token expired or revoked) → surfaced
-  to the tool caller as `MISSING_CREDENTIALS` with a message naming that
-  re-running `hermes-mcp-login` is needed — not `UNAUTHENTICATED`, because the
-  fix is different (no token will work until a fresh login, versus a transient
+- A refresh that itself gets a 401 or 403 (refresh token expired or revoked) →
+  the stored credentials are dropped and the failure is surfaced to the tool
+  caller as `MISSING_CREDENTIALS` with a message naming that re-running
+  `hermes-mcp-login` is needed — not `UNAUTHENTICATED`, because the fix is
+  different (no token will work until a fresh login, versus a transient
   rejection).
+- Any *other* refresh failure (DNS error, timeout, 5xx) → the credentials are
+  **kept**, and the failure is surfaced as `UNAVAILABLE`. Such a failure says
+  nothing about whether the stored credentials are still good, so one hiccup at
+  the 60s-before-expiry boundary must not log the process out until a human
+  restarts it. Telling the two apart requires the auth calls to throw a typed
+  error carrying the HTTP status (`HermesAuthError`), not a bare `Error`.
+- Every outbound auth call (`/otp/email/send`, `/auth/web`,
+  `/auth/stores/login`, `/auth/refresh`) carries an `AbortController` timeout,
+  matching `HermesClient`'s: a hung Hermes would otherwise hang a tool call
+  indefinitely through the whole MCP chain, or hang `npm run login` with no
+  output.
 
 ## Testing
 

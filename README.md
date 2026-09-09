@@ -38,7 +38,7 @@ Hermes unexpectedly rejects it, so you should rarely need to log in again.
 |---|---|---|
 | `HERMES_MCP_LOG_LEVEL` | `info` | `silent`\|`error`\|`warn`\|`info`\|`debug` |
 | `HERMES_BASE_URL` | `https://hermes-atlas.vjr-dev.com` | Host root tool calls and login go to |
-| `HERMES_OPENAPI_DOCS_URL` | `https://hermes-atlas.vajro.com/v3/api-docs` | Where tool schemas refresh from |
+| `HERMES_OPENAPI_DOCS_URL` | `https://hermes-atlas.vjr-dev.com/v3/api-docs` | Where tool schemas refresh from. Separate setting from `HERMES_BASE_URL`, but point both at the same environment. |
 | `HERMES_OPENAPI_REFRESH_INTERVAL_S` | `900` | Background schema refresh interval |
 | `HERMES_ACCESS_TOKEN` | — | Fallback for CI/scripting; used only when no `credentials.json` exists. Set with `HERMES_STORE_ID` or neither. |
 | `HERMES_STORE_ID` | — | See above |

@@ -104,13 +104,23 @@ claude mcp add hermes-mcp -e HERMES_ACCESS_TOKEN=... -e HERMES_STORE_ID=... -- n
   schema snapshot it started with. On startup, and again every
   `HERMES_OPENAPI_REFRESH_INTERVAL_S` (default 900s), the server fetches the
   live spec from `HERMES_OPENAPI_DOCS_URL` (default
-  `https://hermes-atlas.vajro.com/v3/api-docs`) and, for every allowlisted
+  `https://hermes-atlas.vjr-dev.com/v3/api-docs`, the same environment as
+  `HERMES_BASE_URL`'s default) and, for every allowlisted
   entry, rebuilds its Zod input schema from the fresh spec via the same
   resolver function the codegen script uses (`src/registry/schemaFromOpenApi.ts`
   — one implementation, used offline and at runtime, so they can't drift from
   each other). The rebuilt schema map swaps in atomically; in-flight tool
   calls finish against whichever schema they started with. A tool call newly
   arriving after a refresh is validated against the refreshed schema.
+  - **Re-advertising**: refreshing the registry is only half the job — the MCP
+    server holds whatever schema each tool was registered with, so every
+    refresh (background or on demand) also pushes the changed schemas back
+    through the retained `RegisteredTool` handles via
+    `update({ paramsSchema })`, which reassigns the input schema the SDK
+    validates against and notifies clients with `tools/list_changed`. Without
+    that step a refresh changes nothing observable: `tools/list` keeps
+    advertising the startup schema and a newly *required* param is stripped by
+    validation before it can reach the request builder.
   - **Startup fallback**: if the live fetch fails at startup (network error,
     non-200, malformed spec), the server logs a warning and starts anyway
     using the checked-in snapshot's schemas — an unreachable docs endpoint
@@ -150,7 +160,10 @@ claude mcp add hermes-mcp -e HERMES_ACCESS_TOKEN=... -e HERMES_STORE_ID=... -- n
   `HERMES_BASE_URL` (where tool calls go — host root, e.g.
   `https://hermes-atlas.vjr-dev.com`) and `HERMES_OPENAPI_DOCS_URL` (where
   the spec is fetched from) are separate settings on separate hosts/paths
-  and must not be derived from one another. `HERMES_ACCESS_TOKEN` and
+  and must not be derived from one another — but their defaults point at the
+  same environment, and a deployment should keep them there: refreshing tool
+  schemas from one environment while issuing tool calls against another
+  serves schemas for a host nobody is talking to. `HERMES_ACCESS_TOKEN` and
   `HERMES_STORE_ID` must be set together or not at all.
 
 ## v1 tool scope

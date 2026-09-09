@@ -40,7 +40,7 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): HermesMcpConfi
     serverName: "hermes-mcp",
     serverVersion: "0.1.0",
     hermesBaseUrl: env.HERMES_BASE_URL ?? "https://hermes-atlas.vjr-dev.com",
-    openApiDocsUrl: env.HERMES_OPENAPI_DOCS_URL ?? "https://hermes-atlas.vajro.com/v3/api-docs",
+    openApiDocsUrl: env.HERMES_OPENAPI_DOCS_URL ?? "https://hermes-atlas.vjr-dev.com/v3/api-docs",
     openApiRefreshIntervalS,
     openApiFetchTimeoutMs: 10_000,
     credentials: accessToken && storeId ? { accessToken, storeId } : null,

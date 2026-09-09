@@ -6,7 +6,7 @@ describe("loadConfig", () => {
     const config = loadConfig({});
     expect(config.logLevel).toBe("info");
     expect(config.hermesBaseUrl).toBe("https://hermes-atlas.vjr-dev.com");
-    expect(config.openApiDocsUrl).toBe("https://hermes-atlas.vajro.com/v3/api-docs");
+    expect(config.openApiDocsUrl).toBe("https://hermes-atlas.vjr-dev.com/v3/api-docs");
     expect(config.openApiRefreshIntervalS).toBe(900);
     expect(config.credentials).toBeNull();
   });
