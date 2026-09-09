@@ -1,28 +1,42 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { refreshAccessToken, webLogin } from "../../src/auth/hermesAuth.js";
+import { refreshAccessToken, sendEmailOtp, storeLogin, webLogin } from "../../src/auth/hermesAuth.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("sendEmailOtp", () => {
+  it("posts the email and sends no Authorization header", async () => {
+    const fetchMock = vi.fn(async (url: URL, init: RequestInit) => {
+      expect(String(url)).toBe("https://hermes.test/api/v1/otp/email/send");
+      expect(init.body).toBe(JSON.stringify({ email: "me@x.com" }));
+      expect((init.headers as Record<string, string>).Authorization).toBeUndefined();
+      return new Response(JSON.stringify({ data: { message: "sent" } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await sendEmailOtp("https://hermes.test", "me@x.com");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("webLogin", () => {
-  it("sends Basic Auth plus the domain body, and unwraps {data}", async () => {
+  it("sends Basic base64(email:otp) with an empty body and maps the response", async () => {
     const fetchMock = vi.fn(async (url: URL, init: RequestInit) => {
       expect(String(url)).toBe("https://hermes.test/api/v1/auth/web");
-      const headers = init.headers as Record<string, string>;
-      expect(headers.Authorization).toBe(
-        `Basic ${Buffer.from("me@x.com:secret", "utf-8").toString("base64")}`
+      expect(init.body).toBe("{}");
+      expect((init.headers as Record<string, string>).Authorization).toBe(
+        `Basic ${Buffer.from("me@x.com:123456", "utf-8").toString("base64")}`
       );
-      expect(JSON.parse(init.body as string)).toEqual({ domain: "store.myshopify.com" });
       return new Response(
         JSON.stringify({
           data: {
             userId: "u1",
             accessToken: "a",
             refreshToken: "r",
-            expiresAt: 1_800_000_000,
+            expiresAt: 1_800_000_000_000,
             isAdmin: false,
-            stores: [{ id: "s1", name: "My Store", domain: "store.myshopify.com" }],
+            stores: [{ id: "s1", name: "Store One", domain: "one.myshopify.com" }],
           },
         }),
         { status: 200 }
@@ -30,48 +44,42 @@ describe("webLogin", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await webLogin("https://hermes.test", "store.myshopify.com", "me@x.com", "secret");
-
+    const result = await webLogin("https://hermes.test", "me@x.com", "123456");
     expect(result.accessToken).toBe("a");
-    expect(result.stores).toEqual([{ id: "s1", name: "My Store", domain: "store.myshopify.com" }]);
+    expect(result.stores).toHaveLength(1);
   });
 
-  it("reads an unenveloped response body too", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        async () =>
-          new Response(
-            JSON.stringify({
-              userId: "u1",
-              accessToken: "a",
-              refreshToken: "r",
-              expiresAt: 1_800_000_000,
-              isAdmin: false,
-              stores: [],
-            }),
-            { status: 200 }
-          )
-      )
-    );
-    const result = await webLogin("https://hermes.test", "d", "e", "p");
-    expect(result.accessToken).toBe("a");
-  });
-
-  it("throws on a non-2xx status", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 401 })));
-    await expect(webLogin("https://hermes.test", "d", "e", "p")).rejects.toThrow(/401/);
-  });
-
-  it("never includes the password in a thrown error", async () => {
+  it("never includes the one-time code in a thrown error", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 401 })));
 
-    const error = await webLogin("https://hermes.test", "d", "me@x.com", "hunter2").catch(
+    const error = await webLogin("https://hermes.test", "me@x.com", "123456").catch(
       (err: unknown) => err
     );
 
     expect(error).toBeInstanceOf(Error);
-    expect(String(error)).not.toContain("hunter2");
+    expect(String(error)).not.toContain("123456");
+  });
+});
+
+describe("storeLogin", () => {
+  it("sends the store id as a header with an empty body", async () => {
+    const fetchMock = vi.fn(async (url: URL, init: RequestInit) => {
+      expect(String(url)).toBe("https://hermes.test/api/v1/auth/stores/login");
+      expect(init.body).toBe("{}");
+      const headers = init.headers as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer a");
+      expect(headers["X-Store-Id"]).toBe("s1");
+      return new Response(JSON.stringify({ data: { message: "ok" } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await storeLogin("https://hermes.test", "a", "s1");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws on a non-2xx status", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 403 })));
+    await expect(storeLogin("https://hermes.test", "a", "s1")).rejects.toThrow(/403/);
   });
 });
 

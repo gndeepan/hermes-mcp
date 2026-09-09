@@ -19,10 +19,12 @@ npm start         # node dist/server.js -- speaks MCP over stdio
 ## Logging in
 
 `npm run login` (or `node dist/login.js`) starts a short-lived local server on
-`127.0.0.1`, opens your browser to a login form, and calls Hermes's Web login
-(`POST /api/v1/auth/web`). If your account has access to one store it is chosen
-automatically; with several, the page shows a picker. Pass `--store <id>` to skip
-the picker non-interactively.
+`127.0.0.1` and opens your browser to a login form. Enter your email, and Hermes
+mails you a one-time code (`POST /api/v1/otp/email/send`); enter that code on the
+next screen to log in (`POST /api/v1/auth/web`). If your account has access to
+one store it is chosen automatically; with several, the page shows a picker.
+Pass `--store <id>` to skip the picker non-interactively — the id is validated
+against the stores your account can access before anything is saved.
 
 The resulting token pair is saved to `credentials.json` in your OS config
 directory (`%APPDATA%\hermes-mcp\` on Windows, `~/.config/hermes-mcp/` on Linux,

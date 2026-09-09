@@ -1,14 +1,16 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { webLogin } from "../auth/hermesAuth.js";
+import { sendEmailOtp, storeLogin, webLogin } from "../auth/hermesAuth.js";
 import type { LoginStore } from "../auth/hermesAuth.js";
 import type { TokenStore } from "../auth/tokenStore.js";
-import { renderDone, renderLoginForm, renderStorePicker } from "./loginPage.js";
+import { renderDone, renderEmailForm, renderOtpForm, renderStorePicker } from "./loginPage.js";
 
 export interface LoginServerDeps {
   hermesBaseUrl: string;
   store: TokenStore;
+  sendOtp?: typeof sendEmailOtp;
   login?: typeof webLogin;
+  selectStore?: typeof storeLogin;
   presetStoreId?: string;
 }
 
@@ -38,7 +40,9 @@ const isKnownStore = (stores: LoginStore[], id: string): boolean =>
   stores.some((store) => store.id === id);
 
 export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> => {
+  const sendOtp = deps.sendOtp ?? sendEmailOtp;
   const login = deps.login ?? webLogin;
+  const selectStore = deps.selectStore ?? storeLogin;
   let pending: { accessToken: string; refreshToken: string; expiresAt: number; stores: LoginStore[] } | null =
     null;
   let settle: (ok: boolean) => void = () => {};
@@ -46,8 +50,9 @@ export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> =>
     settle = resolve;
   });
 
-  const persist = (storeId: string): void => {
+  const registerAndPersist = async (storeId: string): Promise<void> => {
     if (!pending) throw new Error("No pending login to persist.");
+    await selectStore(deps.hermesBaseUrl, pending.accessToken, storeId);
     deps.store.write({
       accessToken: pending.accessToken,
       refreshToken: pending.refreshToken,
@@ -60,18 +65,29 @@ export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> =>
     void (async () => {
       try {
         if (req.method === "GET" && req.url === "/") {
-          html(res, 200, renderLoginForm());
+          html(res, 200, renderEmailForm());
           return;
         }
 
-        if (req.method === "POST" && req.url === "/login") {
+        if (req.method === "POST" && req.url === "/request-otp") {
           const body = await readBody(req);
-          const result = await login(
-            deps.hermesBaseUrl,
-            body.domain ?? "",
-            body.email ?? "",
-            body.password ?? ""
-          );
+          const email = body.email ?? "";
+          await sendOtp(deps.hermesBaseUrl, email);
+          html(res, 200, renderOtpForm(email));
+          return;
+        }
+
+        if (req.method === "POST" && req.url === "/verify-otp") {
+          const body = await readBody(req);
+          const email = body.email ?? "";
+          let result;
+          try {
+            result = await login(deps.hermesBaseUrl, email, body.otp ?? "");
+          } catch (err) {
+            // A wrong or expired code is worth retrying on the same screen.
+            html(res, 200, renderOtpForm(email, err instanceof Error ? err.message : String(err)));
+            return;
+          }
           pending = {
             accessToken: result.accessToken,
             refreshToken: result.refreshToken,
@@ -82,26 +98,21 @@ export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> =>
           if (deps.presetStoreId) {
             if (!isKnownStore(result.stores, deps.presetStoreId)) {
               const available = result.stores.map((store) => store.id).join(", ") || "none";
-              html(
-                res,
-                400,
-                renderLoginForm(
-                  `Store "${deps.presetStoreId}" is not available to this account. ` +
-                    `Available store ids: ${available}.`
-                )
-              );
+              html(res, 400, renderEmailForm(
+                `Store "${deps.presetStoreId}" is not available to this account. Available store ids: ${available}.`
+              ));
               // A bad --store flag will not fix itself on retry — don't let the CLI hang forever.
               settle(false);
               return;
             }
-            persist(deps.presetStoreId);
+            await registerAndPersist(deps.presetStoreId);
             html(res, 200, renderDone());
             settle(true);
             return;
           }
 
           if (result.stores.length === 1) {
-            persist(result.stores[0].id);
+            await registerAndPersist(result.stores[0].id);
             html(res, 200, renderDone());
             settle(true);
             return;
@@ -114,10 +125,10 @@ export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> =>
         if (req.method === "POST" && req.url === "/select-store") {
           const body = await readBody(req);
           if (!pending || !body.storeId || !isKnownStore(pending.stores, body.storeId)) {
-            html(res, 400, renderLoginForm("Log in again."));
+            html(res, 400, renderEmailForm("Log in again."));
             return;
           }
-          persist(body.storeId);
+          await registerAndPersist(body.storeId);
           html(res, 200, renderDone());
           settle(true);
           return;
@@ -126,7 +137,7 @@ export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> =>
         res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
         res.end("Not found");
       } catch (err) {
-        html(res, 200, renderLoginForm(err instanceof Error ? err.message : String(err)));
+        html(res, 200, renderEmailForm(err instanceof Error ? err.message : String(err)));
       }
     })();
   });

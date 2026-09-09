@@ -31,19 +31,26 @@ const page = (body: string): string => `<!doctype html>
 <body>${body}</body>
 </html>`;
 
-export const renderLoginForm = (error?: string): string =>
+export const renderEmailForm = (error?: string): string =>
   page(`
   <h1>Log in to Hermes</h1>
   ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
-  <form method="post" action="/login">
-    <label>Store domain
-      <input name="domain" required placeholder="store.myshopify.com" autofocus>
-    </label>
+  <form method="post" action="/request-otp">
     <label>Email
-      <input name="email" type="email" required autocomplete="username">
+      <input name="email" type="email" required autofocus autocomplete="username">
     </label>
-    <label>Password
-      <input name="password" type="password" required autocomplete="current-password">
+    <button type="submit">Email me a code</button>
+  </form>`);
+
+export const renderOtpForm = (email: string, error?: string): string =>
+  page(`
+  <h1>Enter your code</h1>
+  <p>We emailed a one-time code to ${escapeHtml(email)}.</p>
+  ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+  <form method="post" action="/verify-otp">
+    <input type="hidden" name="email" value="${escapeHtml(email)}">
+    <label>One-time code
+      <input name="otp" required autofocus autocomplete="one-time-code" inputmode="numeric">
     </label>
     <button type="submit">Log in</button>
   </form>`);

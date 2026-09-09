@@ -32,23 +32,36 @@ const postJson = async (url: URL, body: unknown, headers: Record<string, string>
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    // Deliberately does not include the request body — it carries the password.
+    // Names only the path and status: the Authorization header carries the OTP.
     throw new Error(`Hermes ${url.pathname} failed with status ${response.status}`);
   }
   return response.json();
 };
 
-export const webLogin = async (
-  baseUrl: string,
-  domain: string,
-  email: string,
-  password: string
-): Promise<WebLoginResult> => {
-  const basic = Buffer.from(`${email}:${password}`, "utf-8").toString("base64");
-  const payload = await postJson(new URL("/api/v1/auth/web", baseUrl), { domain }, {
+/** Mails a one-time code. Sends no Authorization header — this call precedes having a token. */
+export const sendEmailOtp = async (baseUrl: string, email: string): Promise<void> => {
+  await postJson(new URL("/api/v1/otp/email/send", baseUrl), { email });
+};
+
+/**
+ * Exchanges an emailed one-time code for a token pair.
+ * The Basic-auth password slot carries the OTP, not a password, and the body is
+ * empty — this mirrors the Dashboard's own call exactly.
+ */
+export const webLogin = async (baseUrl: string, email: string, otp: string): Promise<WebLoginResult> => {
+  const basic = Buffer.from(`${email}:${otp}`, "utf-8").toString("base64");
+  const payload = await postJson(new URL("/api/v1/auth/web", baseUrl), {}, {
     Authorization: `Basic ${basic}`,
   });
   return unwrap<WebLoginResult>(payload);
+};
+
+/** Registers the chosen store server-side. The response body is not inspected — only success matters. */
+export const storeLogin = async (baseUrl: string, accessToken: string, storeId: string): Promise<void> => {
+  await postJson(new URL("/api/v1/auth/stores/login", baseUrl), {}, {
+    Authorization: `Bearer ${accessToken}`,
+    "X-Store-Id": storeId,
+  });
 };
 
 export const refreshAccessToken = async (baseUrl: string, refreshToken: string): Promise<RefreshResult> => {
