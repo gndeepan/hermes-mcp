@@ -333,6 +333,10 @@ describe("startLoginServer", () => {
       store: fakeStore(),
       selectStore: noopSelectStore,
     });
+
+    // The resolved bind address, not just "something answers on loopback" —
+    // a server bound to 0.0.0.0 answers on 127.0.0.1 identically.
+    expect(server.address).toBe("127.0.0.1");
     expect(server.port).toBeGreaterThan(0);
     const response = await fetch(`http://127.0.0.1:${server.port}/`);
     expect(response.status).toBe(200);

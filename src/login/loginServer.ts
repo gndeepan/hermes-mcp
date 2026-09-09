@@ -15,6 +15,12 @@ export interface LoginServerDeps {
 }
 
 export interface LoginServer {
+  /**
+   * The resolved bind address. Exposed so a test can assert the one security
+   * property of a throwaway HTTP server that briefly accepts a one-time code:
+   * it is reachable from this machine only.
+   */
+  address: string;
   port: number;
   close(): Promise<void>;
   /** Resolves true once credentials are persisted, false if closed without a login. */
@@ -35,6 +41,9 @@ const html = (res: http.ServerResponse, status: number, body: string): void => {
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
   res.end(body);
 };
+
+/** Loopback only: this server briefly accepts a one-time code. */
+const LOOPBACK = "127.0.0.1";
 
 const isKnownStore = (stores: LoginStore[], id: string): boolean =>
   stores.some((store) => store.id === id);
@@ -157,9 +166,11 @@ export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> =>
 
   return new Promise<LoginServer>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
+    server.listen(0, LOOPBACK, () => {
+      const bound = server.address() as AddressInfo;
       resolve({
-        port: (server.address() as AddressInfo).port,
+        address: bound.address,
+        port: bound.port,
         close: () =>
           new Promise<void>((done) => {
             settle(false);
