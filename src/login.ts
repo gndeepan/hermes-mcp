@@ -35,7 +35,9 @@ const main = async (): Promise<void> => {
 
   const ok = await server.waitForCompletion();
   await server.close();
-  process.stderr.write(ok ? "Logged in. Credentials saved.\n" : "Login did not complete.\n");
+  process.stderr.write(
+    ok ? "Logged in. Credentials saved.\n" : "Login did not complete — the browser tab says why.\n"
+  );
   process.exit(ok ? 0 : 1);
 };
 

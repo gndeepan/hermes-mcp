@@ -21,10 +21,26 @@ npm start         # node dist/server.js -- speaks MCP over stdio
 `npm run login` (or `node dist/login.js`) starts a short-lived local server on
 `127.0.0.1` and opens your browser to a login form. Enter your email, and Hermes
 mails you a one-time code (`POST /api/v1/otp/email/send`); enter that code on the
-next screen to log in (`POST /api/v1/auth/web`). If your account has access to
-one store it is chosen automatically; with several, the page shows a picker.
-Pass `--store <id>` to skip the picker non-interactively — the id is validated
-against the stores your account can access before anything is saved.
+next screen to log in (`POST /api/v1/auth/web`). Whichever store you end up on is
+then registered with Hermes (`POST /api/v1/auth/stores/login`) before any
+credential is written.
+
+How the store gets chosen depends on the account, exactly as in the Dashboard:
+
+| Account | Store selection |
+|---|---|
+| One store | Chosen automatically |
+| Several stores | The page shows a picker |
+| Internal admin | Hermes returns no store list, because an admin can reach every store — the page shows a search box instead (`GET /api/v1/stores/search`, by name, tag or numeric app id) |
+| No stores, not an admin | The page says so and the login ends; ask support for access |
+
+A store that exists but has no modernization store id is listed and greyed out
+rather than hidden, so a search for it doesn't look like it found nothing.
+
+Pass `--store <id>` to skip the picker non-interactively. For a normal account
+the id is checked against the stores your account can access before anything is
+saved; an admin has no such list, so the store-registration call is the check —
+either way nothing is written until Hermes has accepted the store.
 
 The resulting token pair is saved to `credentials.json` in your OS config
 directory (`%APPDATA%\hermes-mcp\` on Windows, `~/.config/hermes-mcp/` on Linux,

@@ -1,9 +1,15 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { sendEmailOtp, storeLogin, webLogin } from "../auth/hermesAuth.js";
+import { searchStores, sendEmailOtp, storeLogin, webLogin } from "../auth/hermesAuth.js";
 import type { LoginStore } from "../auth/hermesAuth.js";
 import type { TokenStore } from "../auth/tokenStore.js";
-import { renderDone, renderEmailForm, renderOtpForm, renderStorePicker } from "./loginPage.js";
+import {
+  renderDone,
+  renderEmailForm,
+  renderMessage,
+  renderOtpForm,
+  renderStorePicker,
+} from "./loginPage.js";
 
 export interface LoginServerDeps {
   hermesBaseUrl: string;
@@ -11,6 +17,7 @@ export interface LoginServerDeps {
   sendOtp?: typeof sendEmailOtp;
   login?: typeof webLogin;
   selectStore?: typeof storeLogin;
+  findStores?: typeof searchStores;
   presetStoreId?: string;
 }
 
@@ -45,19 +52,40 @@ const html = (res: http.ServerResponse, status: number, body: string): void => {
 /** Loopback only: this server briefly accepts a one-time code. */
 const LOOPBACK = "127.0.0.1";
 
+/**
+ * Only an id Hermes itself handed us may be persisted — a store with no
+ * modernization id comes back as `id: ""` and must never satisfy this.
+ */
 const isKnownStore = (stores: LoginStore[], id: string): boolean =>
-  stores.some((store) => store.id === id);
+  id !== "" && stores.some((store) => store.id === id);
+
+interface PendingLogin {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+  isAdmin: boolean;
+  /** Every store Hermes has named for this session: the login list plus any search hit. */
+  knownStores: LoginStore[];
+}
 
 export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> => {
   const sendOtp = deps.sendOtp ?? sendEmailOtp;
   const login = deps.login ?? webLogin;
   const selectStore = deps.selectStore ?? storeLogin;
-  let pending: { accessToken: string; refreshToken: string; expiresAt: number; stores: LoginStore[] } | null =
-    null;
+  const findStores = deps.findStores ?? searchStores;
+  let pending: PendingLogin | null = null;
   let settle: (ok: boolean) => void = () => {};
   const completion = new Promise<boolean>((resolve) => {
     settle = resolve;
   });
+
+  const rememberStores = (session: PendingLogin, stores: LoginStore[]): void => {
+    for (const store of stores) {
+      if (store.id && !session.knownStores.some((known) => known.id === store.id)) {
+        session.knownStores.push(store);
+      }
+    }
+  };
 
   const registerAndPersist = async (storeId: string): Promise<void> => {
     if (!pending) throw new Error("No pending login to persist.");
@@ -116,16 +144,23 @@ export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> =>
             html(res, 200, renderOtpForm(email, err instanceof Error ? err.message : String(err)));
             return;
           }
-          pending = {
+          const session: PendingLogin = {
             accessToken: result.accessToken,
             refreshToken: result.refreshToken,
             expiresAt: result.expiresAt,
-            stores: result.stores,
+            isAdmin: result.isAdmin,
+            knownStores: [],
           };
+          rememberStores(session, result.stores);
+          pending = session;
 
           if (deps.presetStoreId) {
-            if (!isKnownStore(result.stores, deps.presetStoreId)) {
-              const available = result.stores.map((store) => store.id).join(", ") || "none";
+            // An admin's login list is empty because they can reach every store, so
+            // there is no list to check the flag against. Hermes is the authority
+            // either way: finish() registers the store before anything is persisted,
+            // and a store this account may not use fails that call.
+            if (!session.isAdmin && !isKnownStore(session.knownStores, deps.presetStoreId)) {
+              const available = session.knownStores.map((store) => store.id).join(", ") || "none";
               html(res, 400, renderEmailForm(
                 `Store "${deps.presetStoreId}" is not available to this account. Available store ids: ${available}.`
               ));
@@ -137,18 +172,57 @@ export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> =>
             return;
           }
 
-          if (result.stores.length === 1) {
-            await finish(res, result.stores[0].id);
+          if (session.knownStores.length === 1) {
+            await finish(res, session.knownStores[0].id);
             return;
           }
 
-          html(res, 200, renderStorePicker(result.stores));
+          // An admin gets no store list from Hermes — they search for one instead.
+          // Anyone else with no list has nothing to pick and nothing to search, so
+          // say so rather than serving an empty picker the CLI would wait on forever.
+          if (session.knownStores.length === 0 && !session.isAdmin) {
+            html(res, 403, renderMessage(
+              "No stores available",
+              "This account cannot access any store. Ask the Vajro support team for access, then run the login again."
+            ));
+            settle(false);
+            return;
+          }
+
+          html(res, 200, renderStorePicker({ stores: session.knownStores, canSearch: session.isAdmin }));
+          return;
+        }
+
+        if (req.method === "POST" && req.url === "/search-stores") {
+          const body = await readBody(req);
+          const session = pending;
+          if (!session || !session.isAdmin) {
+            html(res, 400, renderEmailForm("Log in again."));
+            return;
+          }
+          const query = body.query ?? "";
+          let results: LoginStore[];
+          try {
+            results = await findStores(deps.hermesBaseUrl, session.accessToken, query);
+          } catch (err) {
+            // The session is still good — only this search failed, so keep the
+            // picker up rather than sending them back through the OTP.
+            html(res, 200, renderStorePicker({
+              stores: [],
+              canSearch: true,
+              query,
+              error: `Store search failed: ${err instanceof Error ? err.message : String(err)}`,
+            }));
+            return;
+          }
+          rememberStores(session, results);
+          html(res, 200, renderStorePicker({ stores: results, canSearch: true, query }));
           return;
         }
 
         if (req.method === "POST" && req.url === "/select-store") {
           const body = await readBody(req);
-          if (!pending || !body.storeId || !isKnownStore(pending.stores, body.storeId)) {
+          if (!pending || !body.storeId || !isKnownStore(pending.knownStores, body.storeId)) {
             html(res, 400, renderEmailForm("Log in again."));
             return;
           }

@@ -21,14 +21,17 @@ const fakeStore = (): TokenStore & { written: StoredCredentials[] } => {
   };
 };
 
-const loginResult = (stores: WebLoginResult["stores"]): WebLoginResult => ({
+const loginResult = (stores: WebLoginResult["stores"], isAdmin = false): WebLoginResult => ({
   userId: "u1",
   accessToken: "a",
   refreshToken: "r",
   expiresAt: 1_800_000_000_000,
-  isAdmin: false,
+  isAdmin,
   stores,
 });
+
+/** What Hermes returns for an internal admin: no assigned stores, `isAdmin` set. */
+const adminLogin = async () => loginResult([], true);
 
 const singleStoreLogin = async () =>
   loginResult([{ id: "s1", name: "Store One", domain: "one.myshopify.com" }]);
@@ -325,6 +328,201 @@ describe("startLoginServer", () => {
 
     expect(response.status).toBe(400);
     expect(store.written).toHaveLength(0);
+  });
+
+  it("offers a search box instead of an empty picker when an admin has no assigned stores", async () => {
+    const store = fakeStore();
+    server = await startLoginServer({
+      hermesBaseUrl: "https://hermes.test",
+      store,
+      login: adminLogin,
+      selectStore: noopSelectStore,
+    });
+
+    const response = await postJson(server.port, "/verify-otp", { email: "me@x.com", otp: "123456" });
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    // The old behavior was a "Pick a store" page with nothing on it, which left
+    // the CLI waiting on a completion that could never come.
+    expect(body).toContain('action="/search-stores"');
+    expect(body).toContain('name="query"');
+    expect(store.written).toHaveLength(0);
+  });
+
+  it("finds a store by search and persists the one picked from the results", async () => {
+    const store = fakeStore();
+    const selectStore = vi.fn(async () => {});
+    const findStores = vi.fn(async () => [{ id: "s9", name: "Acme", appId: 42 }]);
+    server = await startLoginServer({
+      hermesBaseUrl: "https://hermes.test",
+      store,
+      login: adminLogin,
+      selectStore,
+      findStores,
+    });
+
+    await postJson(server.port, "/verify-otp", { email: "me@x.com", otp: "123456" });
+    const results = await (await postJson(server.port, "/search-stores", { query: "acme" })).text();
+
+    expect(findStores).toHaveBeenCalledWith(expect.any(String), "a", "acme");
+    expect(results).toContain("Acme");
+
+    const response = await postJson(server.port, "/select-store", { storeId: "s9" });
+
+    expect(response.status).toBe(200);
+    expect(await server.waitForCompletion()).toBe(true);
+    expect(selectStore).toHaveBeenCalledWith(expect.any(String), "a", "s9");
+    expect(store.written[0]).toMatchObject({ storeId: "s9" });
+  });
+
+  it("still refuses a storeId Hermes never returned, even once searching is available", async () => {
+    const store = fakeStore();
+    server = await startLoginServer({
+      hermesBaseUrl: "https://hermes.test",
+      store,
+      login: adminLogin,
+      selectStore: noopSelectStore,
+      findStores: async () => [{ id: "s9", name: "Acme" }],
+    });
+
+    await postJson(server.port, "/verify-otp", { email: "me@x.com", otp: "123456" });
+    await postJson(server.port, "/search-stores", { query: "acme" });
+    const response = await postJson(server.port, "/select-store", { storeId: "s-never-seen" });
+
+    expect(response.status).toBe(400);
+    expect(store.written).toHaveLength(0);
+  });
+
+  it("shows a store with no modernization id but refuses to persist it", async () => {
+    const store = fakeStore();
+    server = await startLoginServer({
+      hermesBaseUrl: "https://hermes.test",
+      store,
+      login: adminLogin,
+      selectStore: noopSelectStore,
+      findStores: async () => [{ id: "", name: "Legacy Co", appId: 7 }],
+    });
+
+    await postJson(server.port, "/verify-otp", { email: "me@x.com", otp: "123456" });
+    const results = await (await postJson(server.port, "/search-stores", { query: "legacy" })).text();
+
+    // Named, so the operator knows the search found it — but with no form to submit,
+    // because there is no store id to act on.
+    expect(results).toContain("Legacy Co");
+    expect(results).toContain("<button type=\"button\" disabled");
+    expect(results).not.toContain('action="/select-store"');
+
+    const response = await postJson(server.port, "/select-store", { storeId: "" });
+
+    expect(response.status).toBe(400);
+    expect(store.written).toHaveLength(0);
+  });
+
+  it("keeps the picker up when a store search fails", async () => {
+    const store = fakeStore();
+    server = await startLoginServer({
+      hermesBaseUrl: "https://hermes.test",
+      store,
+      login: adminLogin,
+      selectStore: noopSelectStore,
+      findStores: async () => {
+        throw new Error("Hermes /api/v1/stores/search failed with status 500");
+      },
+    });
+
+    await postJson(server.port, "/verify-otp", { email: "me@x.com", otp: "123456" });
+    const response = await postJson(server.port, "/search-stores", { query: "acme" });
+    const body = await response.text();
+
+    // Only the search failed — the session is still good, so the operator must be
+    // able to search again rather than being sent back through the OTP.
+    expect(response.status).toBe(200);
+    expect(body).toContain("500");
+    expect(body).toContain('action="/search-stores"');
+  });
+
+  it("refuses to search for a non-admin account", async () => {
+    const store = fakeStore();
+    server = await startLoginServer({
+      hermesBaseUrl: "https://hermes.test",
+      store,
+      login: async () =>
+        loginResult([
+          { id: "s1", name: "Store One", domain: "one.myshopify.com" },
+          { id: "s2", name: "Store Two", domain: "two.myshopify.com" },
+        ]),
+      selectStore: noopSelectStore,
+      findStores: vi.fn(),
+    });
+
+    const picker = await (
+      await postJson(server.port, "/verify-otp", { email: "me@x.com", otp: "123456" })
+    ).text();
+    // The picker is populated (so this is not vacuous), and carries no search box.
+    expect(picker).toContain('action="/select-store"');
+    expect(picker).not.toContain('action="/search-stores"');
+
+    const response = await postJson(server.port, "/search-stores", { query: "acme" });
+    expect(response.status).toBe(400);
+  });
+
+  it("ends the login when a non-admin account has no stores at all", async () => {
+    const store = fakeStore();
+    server = await startLoginServer({
+      hermesBaseUrl: "https://hermes.test",
+      store,
+      login: async () => loginResult([]),
+      selectStore: noopSelectStore,
+    });
+
+    const response = await postJson(server.port, "/verify-otp", { email: "me@x.com", otp: "123456" });
+    const body = await response.text();
+
+    expect(response.status).toBe(403);
+    expect(body).toContain("cannot access any store");
+    expect(body).not.toContain('action="/select-store"');
+    expect(store.written).toHaveLength(0);
+    // Nothing on that page can advance the login, so the CLI must not wait on it.
+    expect(await server.waitForCompletion()).toBe(false);
+  });
+
+  it("accepts --store for an admin, whose empty login list is not a list of what they may use", async () => {
+    const store = fakeStore();
+    const selectStore = vi.fn(async () => {});
+    server = await startLoginServer({
+      hermesBaseUrl: "https://hermes.test",
+      store,
+      login: adminLogin,
+      selectStore,
+      presetStoreId: "s-admin-picked",
+    });
+
+    await postJson(server.port, "/verify-otp", { email: "me@x.com", otp: "123456" });
+
+    expect(await server.waitForCompletion()).toBe(true);
+    expect(selectStore).toHaveBeenCalledWith(expect.any(String), "a", "s-admin-picked");
+    expect(store.written[0]).toMatchObject({ storeId: "s-admin-picked" });
+  });
+
+  it("persists nothing when Hermes rejects an admin's --store", async () => {
+    const store = fakeStore();
+    server = await startLoginServer({
+      hermesBaseUrl: "https://hermes.test",
+      store,
+      login: adminLogin,
+      selectStore: async () => {
+        throw new Error("Hermes /api/v1/auth/stores/login failed with status 403");
+      },
+      presetStoreId: "s-not-allowed",
+    });
+
+    await postJson(server.port, "/verify-otp", { email: "me@x.com", otp: "123456" });
+
+    // With no list to check an admin's flag against, the store-registration call is
+    // the gate — and it runs before anything is written.
+    expect(store.written).toHaveLength(0);
+    expect(await server.waitForCompletion()).toBe(false);
   });
 
   it("binds to 127.0.0.1 only", async () => {

@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { refreshAccessToken, sendEmailOtp, storeLogin, webLogin } from "../../src/auth/hermesAuth.js";
+import {
+  refreshAccessToken,
+  searchStores,
+  sendEmailOtp,
+  storeLogin,
+  webLogin,
+} from "../../src/auth/hermesAuth.js";
 import { HermesAuthError } from "../../src/errors.js";
 
 afterEach(() => {
@@ -81,6 +87,85 @@ describe("webLogin", () => {
     );
     const result = await webLogin("https://hermes.test", "me@x.com", "123456");
     expect(result.accessToken).toBe("a");
+  });
+
+  it("reads a body with no stores field as an empty store list", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              data: { userId: "u1", accessToken: "a", refreshToken: "r", expiresAt: 1, isAdmin: true },
+            }),
+            { status: 200 }
+          )
+      )
+    );
+
+    const result = await webLogin("https://hermes.test", "me@x.com", "123456");
+
+    // Hermes omits `stores` for admins; the caller must get [] rather than undefined,
+    // which used to crash the login page on `stores.length`.
+    expect(result.stores).toEqual([]);
+    expect(result.isAdmin).toBe(true);
+  });
+});
+
+describe("searchStores", () => {
+  it("sends the Dashboard's three search params and maps storeId to id", async () => {
+    const fetchMock = vi.fn(async (url: URL, init: RequestInit) => {
+      expect(url.pathname).toBe("/api/v1/stores/search");
+      expect(url.searchParams.get("dto")).toBe("acme");
+      expect(url.searchParams.get("query")).toBe("acme");
+      expect(url.searchParams.get("type")).toBe("TAG");
+      expect(init.method).toBe("GET");
+      expect((init.headers as Record<string, string>).Authorization).toBe("Bearer a");
+      return new Response(
+        JSON.stringify([{ storeId: "s9", appId: 42, tenant: 1, name: "Acme", sfAccessToken: "t" }]),
+        { status: 200 }
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const stores = await searchStores("https://hermes.test", "a", "  ACME  ");
+
+    expect(stores).toEqual([{ id: "s9", name: "Acme", domain: undefined, appId: 42 }]);
+  });
+
+  it("searches by app id when the query is numeric", async () => {
+    const fetchMock = vi.fn(async (url: URL) => {
+      expect(url.searchParams.get("type")).toBe("APPID");
+      return new Response("[]", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await searchStores("https://hermes.test", "a", "1234");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a store with no modernization id, but with an empty id so it cannot be picked", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify([{ appId: 7, name: "Legacy" }]), { status: 200 }))
+    );
+
+    const stores = await searchStores("https://hermes.test", "a", "legacy");
+
+    expect(stores).toEqual([{ id: "", name: "Legacy", domain: undefined, appId: 7 }]);
+  });
+
+  it("makes no request for a blank query", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await searchStores("https://hermes.test", "a", "   ")).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws on a non-2xx status", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 403 })));
+    await expect(searchStores("https://hermes.test", "a", "acme")).rejects.toThrow(/403/);
   });
 });
 

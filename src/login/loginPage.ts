@@ -25,7 +25,9 @@ const page = (body: string): string => `<!doctype html>
            border: 1px solid #8888; border-radius: 4px; cursor: pointer; background: #8881; }
   button:hover { background: #8883; }
   .error { color: #b00020; font-size: 0.875rem; margin-top: 1rem; }
+  .empty { color: #8888; font-size: 0.875rem; margin-top: 1.5rem; }
   .store button { margin-top: 0.5rem; text-align: left; }
+  .store button[disabled] { cursor: not-allowed; opacity: 0.5; }
 </style>
 </head>
 <body>${body}</body>
@@ -55,17 +57,55 @@ export const renderOtpForm = (email: string, error?: string): string =>
     <button type="submit">Log in</button>
   </form>`);
 
-export const renderStorePicker = (stores: LoginStore[]): string =>
+export interface StorePickerView {
+  /** The stores to offer: the account's own list, or the results of a search. */
+  stores: LoginStore[];
+  /** Admins reach stores by searching, so only they get the search box. */
+  canSearch: boolean;
+  /** Echoed back into the search box so a refined search starts from the last one. */
+  query?: string;
+  error?: string;
+}
+
+const storeSubtitle = (store: LoginStore): string => {
+  const parts = [store.domain, store.appId === undefined ? "" : `app ${store.appId}`].filter(Boolean);
+  return parts.length > 0 ? ` — ${parts.join(" · ")}` : "";
+};
+
+const storeChoice = (store: LoginStore): string =>
+  store.id
+    ? `<form class="store" method="post" action="/select-store">
+    <input type="hidden" name="storeId" value="${escapeHtml(store.id)}">
+    <button type="submit">${escapeHtml(store.name)}${escapeHtml(storeSubtitle(store))}</button>
+  </form>`
+    : `<div class="store">
+    <button type="button" disabled title="Modernization is not enabled for this store">${escapeHtml(store.name)}${escapeHtml(storeSubtitle(store))}</button>
+  </div>`;
+
+const searchBox = (query: string): string => `
+  <form method="post" action="/search-stores">
+    <label>Find a store by name, tag or app id
+      <input name="query" required autofocus value="${escapeHtml(query)}" autocomplete="off">
+    </label>
+    <button type="submit">Search</button>
+  </form>`;
+
+export const renderStorePicker = (view: StorePickerView): string =>
   page(`
   <h1>Pick a store</h1>
-  ${stores
-    .map(
-      (store) => `<form class="store" method="post" action="/select-store">
-    <input type="hidden" name="storeId" value="${escapeHtml(store.id)}">
-    <button type="submit">${escapeHtml(store.name)} — ${escapeHtml(store.domain)}</button>
-  </form>`
-    )
-    .join("\n")}`);
+  ${view.error ? `<p class="error">${escapeHtml(view.error)}</p>` : ""}
+  ${view.canSearch ? searchBox(view.query ?? "") : ""}
+  ${
+    view.stores.length > 0
+      ? view.stores.map(storeChoice).join("\n")
+      : `<p class="empty">${view.canSearch && view.query ? "No stores matched that search." : "No stores to choose from."}</p>`
+  }`);
+
+/** A terminal state: the page says what happened and offers nothing to click. */
+export const renderMessage = (heading: string, body: string): string =>
+  page(`
+  <h1>${escapeHtml(heading)}</h1>
+  <p>${escapeHtml(body)}</p>`);
 
 export const renderDone = (): string =>
   page(`
