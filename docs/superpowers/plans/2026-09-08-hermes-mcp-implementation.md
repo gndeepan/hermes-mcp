@@ -3419,3 +3419,417 @@ git commit -m "feat: add esbuild build for both entrypoints and the README"
 - Confirm the real shape of Hermes's `expiresAt` (seconds vs milliseconds) on the
   first real login and adjust `SECONDS_EPOCH_THRESHOLD` in
   `src/auth/tokenStore.ts` if the normalization guessed wrong.
+
+---
+
+### Task 15: Switch the login to email + one-time code, and register the chosen store
+
+**Files:**
+- Modify: `src/auth/hermesAuth.ts`
+- Modify: `src/login/loginPage.ts`
+- Modify: `src/login/loginServer.ts`
+- Modify: `test/auth/hermesAuth.test.ts`
+- Modify: `test/login/loginServer.test.ts`
+- Modify: `README.md`
+
+**Interfaces:**
+- Consumes: `TokenStore` from `src/auth/tokenStore.ts`; `LoginStore`, `WebLoginResult`, `RefreshResult` unchanged
+- Produces (replacing the old `webLogin` signature):
+  - `export const sendEmailOtp: (baseUrl: string, email: string) => Promise<void>`
+  - `export const webLogin: (baseUrl: string, email: string, otp: string) => Promise<WebLoginResult>`
+  - `export const storeLogin: (baseUrl: string, accessToken: string, storeId: string) => Promise<void>`
+  - `export const renderEmailForm: (error?: string) => string`
+  - `export const renderOtpForm: (email: string, error?: string) => string`
+  - `LoginServerDeps` gains `sendOtp?: typeof sendEmailOtp` and `selectStore?: typeof storeLogin`; `login?: typeof webLogin` keeps its name with the new signature
+
+**Why this changes:** the Dashboard's own `packages/api/services/auth.ts` is the
+reference for what `POST /api/v1/auth/web` expects, and it sends an **empty body**
+with `Authorization: Basic base64(email + ":" + otp)` — the Basic-auth password
+slot carries a one-time code mailed by `POST /api/v1/otp/email/send`, and there is
+no `domain` field. Hermes has no email+password login at all. After a store is
+chosen, the Dashboard's switcher calls `POST /api/v1/auth/stores/login` with an
+empty body and an `X-Store-Id` header to register the choice.
+
+- [ ] **Step 1: Replace the auth calls in `src/auth/hermesAuth.ts`**
+
+Delete the existing `webLogin`. Update `postJson`'s comment and add the three
+functions below. Keep `LoginStore`, `WebLoginResult`, `RefreshResult`, `unwrap`
+and `refreshAccessToken` exactly as they are.
+
+```ts
+const postJson = async (url: URL, body: unknown, headers: Record<string, string> = {}): Promise<unknown> => {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json", ...headers },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    // Names only the path and status: the Authorization header carries the OTP.
+    throw new Error(`Hermes ${url.pathname} failed with status ${response.status}`);
+  }
+  return response.json();
+};
+
+/** Mails a one-time code. Sends no Authorization header — this call precedes having a token. */
+export const sendEmailOtp = async (baseUrl: string, email: string): Promise<void> => {
+  await postJson(new URL("/api/v1/otp/email/send", baseUrl), { email });
+};
+
+/**
+ * Exchanges an emailed one-time code for a token pair.
+ * The Basic-auth password slot carries the OTP, not a password, and the body is
+ * empty — this mirrors the Dashboard's own call exactly.
+ */
+export const webLogin = async (baseUrl: string, email: string, otp: string): Promise<WebLoginResult> => {
+  const basic = Buffer.from(`${email}:${otp}`, "utf-8").toString("base64");
+  const payload = await postJson(new URL("/api/v1/auth/web", baseUrl), {}, {
+    Authorization: `Basic ${basic}`,
+  });
+  return unwrap<WebLoginResult>(payload);
+};
+
+/** Registers the chosen store server-side. The response body is not inspected — only success matters. */
+export const storeLogin = async (baseUrl: string, accessToken: string, storeId: string): Promise<void> => {
+  await postJson(new URL("/api/v1/auth/stores/login", baseUrl), {}, {
+    Authorization: `Bearer ${accessToken}`,
+    "X-Store-Id": storeId,
+  });
+};
+```
+
+- [ ] **Step 2: Replace the form renderers in `src/login/loginPage.ts`**
+
+Replace `renderLoginForm` with these two. Leave `escapeHtml`, `page`,
+`renderStorePicker` and `renderDone` untouched.
+
+```ts
+export const renderEmailForm = (error?: string): string =>
+  page(`
+  <h1>Log in to Hermes</h1>
+  ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+  <form method="post" action="/request-otp">
+    <label>Email
+      <input name="email" type="email" required autofocus autocomplete="username">
+    </label>
+    <button type="submit">Email me a code</button>
+  </form>`);
+
+export const renderOtpForm = (email: string, error?: string): string =>
+  page(`
+  <h1>Enter your code</h1>
+  <p>We emailed a one-time code to ${escapeHtml(email)}.</p>
+  ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+  <form method="post" action="/verify-otp">
+    <input type="hidden" name="email" value="${escapeHtml(email)}">
+    <label>One-time code
+      <input name="otp" required autofocus autocomplete="one-time-code" inputmode="numeric">
+    </label>
+    <button type="submit">Log in</button>
+  </form>`);
+```
+
+- [ ] **Step 3: Rework the routes in `src/login/loginServer.ts`**
+
+Change the imports to bring in `sendEmailOtp`, `storeLogin`, `webLogin` and the
+two new renderers. Extend `LoginServerDeps`:
+
+```ts
+export interface LoginServerDeps {
+  hermesBaseUrl: string;
+  store: TokenStore;
+  sendOtp?: typeof sendEmailOtp;
+  login?: typeof webLogin;
+  selectStore?: typeof storeLogin;
+  presetStoreId?: string;
+}
+```
+
+Inside `startLoginServer`, resolve all three doubles and keep the pending state
+as it is:
+
+```ts
+const sendOtp = deps.sendOtp ?? sendEmailOtp;
+const login = deps.login ?? webLogin;
+const selectStore = deps.selectStore ?? storeLogin;
+```
+
+Replace `persist(storeId)` with a version that registers the store first, so no
+path can persist a store Hermes did not accept:
+
+```ts
+const registerAndPersist = async (storeId: string): Promise<void> => {
+  if (!pending) throw new Error("No pending login to persist.");
+  await selectStore(deps.hermesBaseUrl, pending.accessToken, storeId);
+  deps.store.write({
+    accessToken: pending.accessToken,
+    refreshToken: pending.refreshToken,
+    expiresAt: pending.expiresAt,
+    storeId,
+  });
+};
+```
+
+Replace the `POST /login` branch with the two branches below. The preset /
+single-store / picker logic and its `isKnownStore` validation stay exactly as
+they were, except that each `persist(...)` becomes `await registerAndPersist(...)`.
+
+```ts
+if (req.method === "POST" && req.url === "/request-otp") {
+  const body = await readBody(req);
+  const email = body.email ?? "";
+  await sendOtp(deps.hermesBaseUrl, email);
+  html(res, 200, renderOtpForm(email));
+  return;
+}
+
+if (req.method === "POST" && req.url === "/verify-otp") {
+  const body = await readBody(req);
+  const email = body.email ?? "";
+  let result;
+  try {
+    result = await login(deps.hermesBaseUrl, email, body.otp ?? "");
+  } catch (err) {
+    // A wrong or expired code is worth retrying on the same screen.
+    html(res, 200, renderOtpForm(email, err instanceof Error ? err.message : String(err)));
+    return;
+  }
+  pending = {
+    accessToken: result.accessToken,
+    refreshToken: result.refreshToken,
+    expiresAt: result.expiresAt,
+    stores: result.stores,
+  };
+
+  if (deps.presetStoreId) {
+    if (!isKnownStore(result.stores, deps.presetStoreId)) {
+      const available = result.stores.map((store) => store.id).join(", ") || "none";
+      html(res, 400, renderEmailForm(
+        `Store "${deps.presetStoreId}" is not available to this account. Available store ids: ${available}.`
+      ));
+      // A bad --store flag will not fix itself on retry — don't let the CLI hang forever.
+      settle(false);
+      return;
+    }
+    await registerAndPersist(deps.presetStoreId);
+    html(res, 200, renderDone());
+    settle(true);
+    return;
+  }
+
+  if (result.stores.length === 1) {
+    await registerAndPersist(result.stores[0].id);
+    html(res, 200, renderDone());
+    settle(true);
+    return;
+  }
+
+  html(res, 200, renderStorePicker(result.stores));
+  return;
+}
+```
+
+Update the `POST /select-store` branch to `await registerAndPersist(body.storeId)`
+and to render `renderEmailForm` on its 400. Update the `GET /` branch and the
+outer `catch` to render `renderEmailForm`.
+
+- [ ] **Step 4: Update `test/auth/hermesAuth.test.ts`**
+
+Rewrite the `webLogin` describe block for the new signature and add blocks for
+the two new functions. Keep the `refreshAccessToken` block as it is. Add
+`sendEmailOtp` and `storeLogin` to the imports.
+
+```ts
+describe("sendEmailOtp", () => {
+  it("posts the email and sends no Authorization header", async () => {
+    const fetchMock = vi.fn(async (url: URL, init: RequestInit) => {
+      expect(String(url)).toBe("https://hermes.test/api/v1/otp/email/send");
+      expect(init.body).toBe(JSON.stringify({ email: "me@x.com" }));
+      expect((init.headers as Record<string, string>).Authorization).toBeUndefined();
+      return new Response(JSON.stringify({ data: { message: "sent" } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await sendEmailOtp("https://hermes.test", "me@x.com");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("webLogin", () => {
+  it("sends Basic base64(email:otp) with an empty body and maps the response", async () => {
+    const fetchMock = vi.fn(async (url: URL, init: RequestInit) => {
+      expect(String(url)).toBe("https://hermes.test/api/v1/auth/web");
+      expect(init.body).toBe("{}");
+      expect((init.headers as Record<string, string>).Authorization).toBe(
+        `Basic ${Buffer.from("me@x.com:123456", "utf-8").toString("base64")}`
+      );
+      return new Response(
+        JSON.stringify({
+          data: {
+            userId: "u1",
+            accessToken: "a",
+            refreshToken: "r",
+            expiresAt: 1_800_000_000_000,
+            isAdmin: false,
+            stores: [{ id: "s1", name: "Store One", domain: "one.myshopify.com" }],
+          },
+        }),
+        { status: 200 }
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await webLogin("https://hermes.test", "me@x.com", "123456");
+    expect(result.accessToken).toBe("a");
+    expect(result.stores).toHaveLength(1);
+  });
+
+  it("never includes the one-time code in a thrown error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 401 })));
+
+    const error = await webLogin("https://hermes.test", "me@x.com", "123456").catch(
+      (err: unknown) => err
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).not.toContain("123456");
+  });
+});
+
+describe("storeLogin", () => {
+  it("sends the store id as a header with an empty body", async () => {
+    const fetchMock = vi.fn(async (url: URL, init: RequestInit) => {
+      expect(String(url)).toBe("https://hermes.test/api/v1/auth/stores/login");
+      expect(init.body).toBe("{}");
+      const headers = init.headers as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer a");
+      expect(headers["X-Store-Id"]).toBe("s1");
+      return new Response(JSON.stringify({ data: { message: "ok" } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await storeLogin("https://hermes.test", "a", "s1");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws on a non-2xx status", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 403 })));
+    await expect(storeLogin("https://hermes.test", "a", "s1")).rejects.toThrow(/403/);
+  });
+});
+```
+
+- [ ] **Step 5: Update `test/login/loginServer.test.ts`**
+
+Adapt every existing test to the two-step flow: where a test previously POSTed
+`/login` with `{domain, email, password}`, it now POSTs `/verify-otp` with
+`{email, otp}`. Give every test's deps a `selectStore` double
+(`vi.fn(async () => {})`) so no test reaches the real Hermes. The `storeId`
+validation tests keep their assertions unchanged — that logic is untouched.
+
+Define this `login` double next to the existing fakes:
+
+```ts
+const singleStoreLogin = async () => ({
+  userId: "u1",
+  accessToken: "a",
+  refreshToken: "r",
+  expiresAt: 1_800_000_000_000,
+  isAdmin: false,
+  stores: [{ id: "s1", name: "Store One", domain: "one.myshopify.com" }],
+});
+```
+
+Add these four cases:
+
+```ts
+it("emails a code and shows the code form", async () => {
+  const sendOtp = vi.fn(async () => {});
+  server = await startLoginServer({ ...baseDeps(), sendOtp });
+
+  const res = await fetch(`http://127.0.0.1:${server.port}/request-otp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "me@x.com" }),
+  });
+
+  expect(res.status).toBe(200);
+  expect(await res.text()).toContain("one-time code");
+  expect(sendOtp).toHaveBeenCalledWith(expect.any(String), "me@x.com");
+});
+
+it("re-renders the code form with an error when the code is wrong", async () => {
+  const login = vi.fn(async () => {
+    throw new Error("Hermes /api/v1/auth/web failed with status 401");
+  });
+  server = await startLoginServer({ ...baseDeps(), login });
+
+  const res = await fetch(`http://127.0.0.1:${server.port}/verify-otp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "me@x.com", otp: "000000" }),
+  });
+
+  const body = await res.text();
+  expect(res.status).toBe(200);
+  expect(body).toContain("one-time code");
+  expect(body).toContain("401");
+});
+
+it("registers the chosen store before persisting", async () => {
+  const selectStore = vi.fn(async () => {});
+  const store = fakeStore();
+  server = await startLoginServer({ ...baseDeps(), store, selectStore, login: singleStoreLogin });
+
+  await fetch(`http://127.0.0.1:${server.port}/verify-otp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "me@x.com", otp: "123456" }),
+  });
+
+  expect(selectStore).toHaveBeenCalledWith(expect.any(String), "a", "s1");
+  expect(store.written).toHaveLength(1);
+});
+
+it("persists nothing when registering the store fails", async () => {
+  const selectStore = vi.fn(async () => {
+    throw new Error("Hermes /api/v1/auth/stores/login failed with status 403");
+  });
+  const store = fakeStore();
+  server = await startLoginServer({ ...baseDeps(), store, selectStore, login: singleStoreLogin });
+
+  await fetch(`http://127.0.0.1:${server.port}/verify-otp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "me@x.com", otp: "123456" }),
+  });
+
+  expect(store.written).toHaveLength(0);
+});
+```
+
+Adapt the helper names above (`baseDeps()`, `fakeStore()`) to whatever the
+existing test file already calls them; do not rename existing helpers.
+
+- [ ] **Step 6: Run the covering tests**
+
+Run: `npx vitest run test/auth/hermesAuth.test.ts test/login/loginServer.test.ts`
+Expected: PASS.
+
+- [ ] **Step 7: Update `README.md`**
+
+In the login section, replace any mention of a store domain or a password with
+the actual flow: run the login command, enter your email, enter the code Hermes
+emails you, then pick a store if your account has more than one. Keep `--store`
+documented, noting it is validated against the stores your account can access.
+
+- [ ] **Step 8: Typecheck and the full suite**
+
+Run: `npm run typecheck` then `npx vitest run`
+Expected: both clean; suite green apart from the known `test/logging.test.ts` line.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/auth/hermesAuth.ts src/login/loginPage.ts src/login/loginServer.ts test/auth/hermesAuth.test.ts test/login/loginServer.test.ts README.md
+git commit -m "feat: log in with an emailed one-time code and register the chosen store"
+```

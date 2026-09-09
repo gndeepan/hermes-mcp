@@ -36,13 +36,29 @@ base design (`src/config.ts`'s credential handling and `src/tools/index.ts`'s
   `~/.config/hermes-mcp/credentials.json` on Linux, `~/Library/Application
   Support/hermes-mcp/credentials.json` on macOS) is simple, has no native
   dependency, and is never inside the repo.
-- **Only the Web login (`POST /api/v1/auth/web`, HTTP Basic Auth + `{domain}`) is
-  in scope.** Hermes has five other login mechanisms (`/api/v1/auth/mobile`,
-  `/api/v1/auth/shopify-session`, `/api/v1/otp-login/*`, `/api/v1/users/shopify-login`,
-  `/api/v1/customers/social-login`) built for the mobile app, the embedded Shopify
-  flow, and shopper-facing login — none of them fit hermes-mcp's actual users
-  (developers and agents acting as an internal operator/merchant, the same
-  population the Dashboard's own login serves).
+- **Only the Web login (`POST /api/v1/auth/web`) is in scope, and it is an
+  email + one-time-code flow — not email + password.** This was corrected after
+  reading the Dashboard's own implementation (`packages/api/services/auth.ts`),
+  which is the reference for what this endpoint actually expects:
+  1. `POST /api/v1/otp/email/send` with `{ email }` and **no** `Authorization`
+     header mails a one-time code.
+  2. `POST /api/v1/auth/web` with an **empty JSON body** and
+     `Authorization: Basic base64(email + ":" + otp)` returns the token pair.
+     The Basic-auth password slot carries **the OTP code**, not a password, and
+     there is no `domain` field — the Dashboard sends `{}`. Hermes has no
+     email+password login endpoint at all.
+  Hermes's other login mechanisms stay out of scope: `/api/v1/auth/mobile` and
+  `/api/v1/auth/shopify-session` serve the mobile app and the embedded Shopify
+  flow, and `/api/v1/otp-login/*` is shopper-facing (its `verify-otp` requires
+  `phone` and returns a `customerAccessToken`, not an operator token) — none fit
+  hermes-mcp's users, who are the same population the Dashboard's login serves.
+- **Store selection is confirmed against the login response, then registered
+  server-side.** The `stores[]` array comes back inline from `/api/v1/auth/web`,
+  so no separate "list my stores" call is needed. Once a store is chosen,
+  `POST /api/v1/auth/stores/login` (empty body, `X-Store-Id` header) records the
+  choice, mirroring what the Dashboard's store switcher does. Its response body
+  is not inspected — only success or failure matters — and a failure aborts the
+  login rather than persisting a store Hermes did not accept.
 - **The static `HERMES_ACCESS_TOKEN`/`HERMES_STORE_ID` env vars from the base
   spec keep working.** They become a fallback when no `credentials.json` exists,
   not a removed feature — CI or a one-off script that doesn't want an interactive
@@ -67,15 +83,23 @@ node dist/login.js [--store <id>]
       │
       ▼  starts a local HTTP server on 127.0.0.1:<ephemeral port>, opens the
       │  default browser to it
- login.html: domain, email, password
+ screen 1: email
       │
-      ▼  POST /api/v1/auth/web  (Authorization: Basic base64(email:password), body {domain})
+      ▼  POST /api/v1/otp/email/send  { email }   (no Authorization header)
+ Hermes mails a one-time code
+      │
+      ▼
+ screen 2: the code
+      │
+      ▼  POST /api/v1/auth/web   body {}   Authorization: Basic base64(email:otp)
  Hermes Atlas
       │
       ▼  200 { userId, accessToken, refreshToken, expiresAt, stores[], isAdmin }
- stores.length === 1 ? persist immediately
- stores.length  > 1  ? page shows a picker (name + domain per store) → persist
-      │                 the clicked store's id  (or: --store <id> skips the picker)
+ stores.length === 1 ? that store
+ stores.length  > 1  ? screen 3 shows a picker (name + domain per store)
+      │                 (or: --store <id> skips the picker, still validated)
+      ▼  POST /api/v1/auth/stores/login   body {}   X-Store-Id: <chosen id>
+      │  (registers the choice; a failure aborts rather than persisting)
       ▼
  credentials.json under the OS config dir; local server shuts down; CLI exits 0
 
@@ -128,11 +152,18 @@ isolated to this one normalization function.
 
 ### `src/auth/hermesAuth.ts`
 
-Two functions, both thin `fetch` wrappers against `HERMES_BASE_URL` (the same
-setting the base spec's `HermesClient` uses):
+Four thin `fetch` wrappers against `HERMES_BASE_URL` (the same setting the base
+spec's `HermesClient` uses):
 
-- `webLogin(baseUrl, domain, email, password): Promise<StoredCredentials & { stores: { id: string; name: string; domain: string }[] }>` — `POST /api/v1/auth/web` with `Authorization: Basic <base64(email:password)>` and body `{ domain }`.
-- `refreshAccessToken(baseUrl, refreshToken): Promise<StoredCredentials>` — `POST /api/v1/auth/refresh` with body `{ refreshToken }`. Both endpoints return the same `WebTokenResponseDto` shape; only the `storeId` needs picking, which `refreshAccessToken` carries over unchanged from the credentials it was given (Hermes's response doesn't re-ask which store — a refresh doesn't change which store you're acting as).
+- `sendEmailOtp(baseUrl, email): Promise<void>` — `POST /api/v1/otp/email/send` with body `{ email }` and no `Authorization` header.
+- `webLogin(baseUrl, email, otp): Promise<WebLoginResult>` — `POST /api/v1/auth/web` with an empty body and `Authorization: Basic <base64(email:otp)>`.
+- `storeLogin(baseUrl, accessToken, storeId): Promise<void>` — `POST /api/v1/auth/stores/login` with an empty body, `Authorization: Bearer <accessToken>` and `X-Store-Id: <storeId>`. Response body unused.
+- `refreshAccessToken(baseUrl, refreshToken): Promise<RefreshResult>` — `POST /api/v1/auth/refresh` with body `{ refreshToken }`. `refreshAccessToken` carries the `storeId` over unchanged from the credentials it was given (Hermes's response doesn't re-state it — a refresh doesn't change which store you act as).
+
+The shared `postJson` helper deliberately omits the request body from the error
+it throws on a non-2xx response: on the login call that body is empty, but the
+`Authorization` header carries the OTP, so nothing about the request is echoed
+into an error or a log.
 
 ### `src/auth/tokenManager.ts`
 
@@ -156,17 +187,23 @@ call-outcome handling.
 
 ### `src/login/loginPage.ts`, `src/login/loginServer.ts`, `src/login.ts`
 
-- `loginPage.ts` exports plain functions returning HTML strings for the two
-  screens (credentials form; store picker) — no templating library, no client-side
-  framework. The form POSTs JSON to the same local server.
+- `loginPage.ts` exports plain functions returning HTML strings for the three
+  screens (email form; one-time-code form; store picker) plus the closing page —
+  no templating library, no client-side framework. Store names come from Hermes
+  and are HTML-escaped.
 - `loginServer.ts` is a plain `node:http` server (this is the one place in the
   repo an HTTP listener is correct — it is not the MCP transport, it is a
   throwaway local server for one login, gone before the MCP server ever starts).
-  Routes: `GET /` (credentials form), `POST /login` (calls `webLogin`, returns the
-  store picker HTML if `stores.length > 1`, otherwise persists and returns a
-  "you're logged in, close this tab" page), `POST /select-store` (persists the
-  picked store, same closing page). Binds to an OS-assigned ephemeral port on
-  `127.0.0.1` only.
+  Routes: `GET /` (email form), `POST /request-otp` (calls `sendEmailOtp`, returns
+  the code form), `POST /verify-otp` (calls `webLogin`, then either the store
+  picker if `stores.length > 1`, or straight through to registering and
+  persisting a single store), `POST /select-store` (validates the picked id
+  against the login response's `stores[]`, calls `storeLogin`, persists, returns
+  the closing page). Binds to an OS-assigned ephemeral port on `127.0.0.1` only.
+  A chosen store is always registered with `storeLogin` before anything is
+  persisted, on every path (single-store, `--store`, and picker alike) — one code
+  path rather than three, since hermes-mcp acts as exactly one store for its whole
+  process lifetime.
 - `login.ts` is the CLI entrypoint (a second `bin` entry: `hermes-mcp-login`):
   parses `--store <id>` if given, starts `loginServer`, opens the default browser
   to it (`child_process.exec` of `start` / `open` / `xdg-open` by platform — no
@@ -219,12 +256,17 @@ spec's hard constraint #4.
   refreshes and persists when within 60s; throws `MissingCredentialsError` when
   nothing is loaded and no env vars are set; a fake clock drives the "within 60s"
   cases deterministically.
-- `hermesAuth`: `webLogin` sends the correct Basic Auth header and body, maps the
-  response into `StoredCredentials`; `refreshAccessToken` likewise.
+- `hermesAuth`: `sendEmailOtp` posts `{ email }` and sends no `Authorization`
+  header; `webLogin` sends `Basic base64(email:otp)` with an empty body and maps
+  the response; `storeLogin` sends the `X-Store-Id` header with an empty body;
+  `refreshAccessToken` likewise. One test asserts the OTP never reaches a thrown
+  error.
 - `loginServer`: driven with real `fetch` calls against `127.0.0.1:<port>` (no
-  browser automation) — `GET /` returns the form; `POST /login` with a mocked
-  Hermes response returns the picker for multiple stores or the closing page for
-  one; `POST /select-store` persists via an injected `tokenStore`.
+  browser automation) — `GET /` returns the email form; `POST /request-otp`
+  returns the code form; `POST /verify-otp` with a mocked Hermes response returns
+  the picker for multiple stores or registers-and-persists for one;
+  `POST /select-store` validates membership, registers, and persists via an
+  injected `tokenStore`; a `storeLogin` failure persists nothing.
 - `wrap()`'s 401-retry-once: a fake `HermesRequester` that fails with
   `HermesUnauthenticatedError` on the first call and succeeds on the second,
   proving exactly one retry (a third call would mean the retry policy loops).
