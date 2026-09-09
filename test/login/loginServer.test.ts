@@ -169,8 +169,10 @@ describe("startLoginServer", () => {
     const pickerHtml = await (
       await postJson(server.port, "/verify-otp", { email: "me@x.com", otp: "123456" })
     ).text();
-    expect(pickerHtml).toContain("Store One");
-    expect(pickerHtml).toContain("Store Two");
+    // One dropdown to choose from, not a wall of buttons.
+    expect(pickerHtml).toContain('<select name="storeId"');
+    expect(pickerHtml).toContain('<option value="s1">Store One');
+    expect(pickerHtml).toContain('<option value="s2">Store Two');
     expect(store.written).toHaveLength(0);
 
     const response = await postJson(server.port, "/select-store", { storeId: "s2" });
@@ -366,7 +368,9 @@ describe("startLoginServer", () => {
     const results = await (await postJson(server.port, "/search-stores", { query: "acme" })).text();
 
     expect(findStores).toHaveBeenCalledWith(expect.any(String), "a", "acme");
-    expect(results).toContain("Acme");
+    expect(results).toContain('<option value="s9">Acme — app 42</option>');
+    // The search box stays, keyed with the last query, so it can be refined.
+    expect(results).toContain('value="acme"');
 
     const response = await postJson(server.port, "/select-store", { storeId: "s9" });
 
@@ -407,16 +411,36 @@ describe("startLoginServer", () => {
     await postJson(server.port, "/verify-otp", { email: "me@x.com", otp: "123456" });
     const results = await (await postJson(server.port, "/search-stores", { query: "legacy" })).text();
 
-    // Named, so the operator knows the search found it — but with no form to submit,
-    // because there is no store id to act on.
+    // Named, so the operator knows the search found it — but with no dropdown to
+    // submit, because there is no store id to act on.
     expect(results).toContain("Legacy Co");
-    expect(results).toContain("<button type=\"button\" disabled");
+    expect(results).toContain("modernization is not enabled");
     expect(results).not.toContain('action="/select-store"');
 
     const response = await postJson(server.port, "/select-store", { storeId: "" });
 
     expect(response.status).toBe(400);
     expect(store.written).toHaveLength(0);
+  });
+
+  it("puts usable and unusable search hits in one dropdown, only the usable ones selectable", async () => {
+    const store = fakeStore();
+    server = await startLoginServer({
+      hermesBaseUrl: "https://hermes.test",
+      store,
+      login: adminLogin,
+      selectStore: noopSelectStore,
+      findStores: async () => [
+        { id: "s9", name: "Acme", appId: 42 },
+        { id: "", name: "Legacy Co", appId: 7 },
+      ],
+    });
+
+    await postJson(server.port, "/verify-otp", { email: "me@x.com", otp: "123456" });
+    const results = await (await postJson(server.port, "/search-stores", { query: "co" })).text();
+
+    expect(results).toContain('<option value="s9">Acme — app 42</option>');
+    expect(results).toContain('<option value="" disabled>Legacy Co — app 7 (modernization not enabled)</option>');
   });
 
   it("keeps the picker up when a store search fails", async () => {
