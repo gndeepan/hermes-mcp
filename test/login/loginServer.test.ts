@@ -110,6 +110,70 @@ describe("startLoginServer", () => {
     expect(store.written[0]).toMatchObject({ storeId: "s2" });
   });
 
+  it("rejects a presetStoreId that is not among the returned stores, without persisting", async () => {
+    const store = fakeStore();
+    const login = async () =>
+      loginResult([
+        { id: "s1", name: "Store One", domain: "one.myshopify.com" },
+        { id: "s2", name: "Store Two", domain: "two.myshopify.com" },
+      ]);
+    server = await startLoginServer({
+      hermesBaseUrl: "https://hermes.test",
+      store,
+      login,
+      presetStoreId: "nope",
+    });
+
+    const response = await postJson(server.port, "/login", {
+      domain: "x",
+      email: "me@x.com",
+      password: "secret",
+    });
+    const text = await response.text();
+
+    expect(response.status).toBe(400);
+    expect(text).not.toContain("Logged in");
+    expect(store.written).toHaveLength(0);
+    // A bad --store flag can never be fixed by resubmitting the same form, so the
+    // server must settle the completion promise rather than leaving the CLI hanging.
+    expect(await server.waitForCompletion()).toBe(false);
+  });
+
+  it("rejects a /select-store storeId that is not among the returned stores", async () => {
+    const store = fakeStore();
+    const login = async () =>
+      loginResult([
+        { id: "s1", name: "Store One", domain: "one.myshopify.com" },
+        { id: "s2", name: "Store Two", domain: "two.myshopify.com" },
+      ]);
+    server = await startLoginServer({ hermesBaseUrl: "https://hermes.test", store, login });
+
+    await postJson(server.port, "/login", { domain: "x", email: "me@x.com", password: "secret" });
+    const response = await postJson(server.port, "/select-store", { storeId: "nope" });
+
+    expect(response.status).toBe(400);
+    expect(store.written).toHaveLength(0);
+  });
+
+  it("persists a /select-store storeId that is among the returned stores (control)", async () => {
+    const store = fakeStore();
+    const login = async () =>
+      loginResult([
+        { id: "s1", name: "Store One", domain: "one.myshopify.com" },
+        { id: "s2", name: "Store Two", domain: "two.myshopify.com" },
+      ]);
+    server = await startLoginServer({ hermesBaseUrl: "https://hermes.test", store, login });
+
+    await postJson(server.port, "/login", { domain: "x", email: "me@x.com", password: "secret" });
+    const response = await postJson(server.port, "/select-store", { storeId: "s1" });
+
+    expect(response.status).toBe(200);
+    expect(await server.waitForCompletion()).toBe(true);
+    expect(store.written).toEqual([
+      { accessToken: "a", refreshToken: "r", expiresAt: 1_800_000_000_000, storeId: "s1" },
+    ]);
+  });
+
   it("accepts a urlencoded body, as a real browser form submits", async () => {
     const store = fakeStore();
     const login = async () => loginResult([{ id: "s1", name: "One", domain: "one.myshopify.com" }]);

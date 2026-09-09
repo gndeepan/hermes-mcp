@@ -34,9 +34,13 @@ const html = (res: http.ServerResponse, status: number, body: string): void => {
   res.end(body);
 };
 
+const isKnownStore = (stores: LoginStore[], id: string): boolean =>
+  stores.some((store) => store.id === id);
+
 export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> => {
   const login = deps.login ?? webLogin;
-  let pending: { accessToken: string; refreshToken: string; expiresAt: number } | null = null;
+  let pending: { accessToken: string; refreshToken: string; expiresAt: number; stores: LoginStore[] } | null =
+    null;
   let settle: (ok: boolean) => void = () => {};
   const completion = new Promise<boolean>((resolve) => {
     settle = resolve;
@@ -44,7 +48,12 @@ export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> =>
 
   const persist = (storeId: string): void => {
     if (!pending) throw new Error("No pending login to persist.");
-    deps.store.write({ ...pending, storeId });
+    deps.store.write({
+      accessToken: pending.accessToken,
+      refreshToken: pending.refreshToken,
+      expiresAt: pending.expiresAt,
+      storeId,
+    });
   };
 
   const server = http.createServer((req, res) => {
@@ -67,12 +76,32 @@ export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> =>
             accessToken: result.accessToken,
             refreshToken: result.refreshToken,
             expiresAt: result.expiresAt,
+            stores: result.stores,
           };
 
-          const only: LoginStore | undefined = result.stores.length === 1 ? result.stores[0] : undefined;
-          const storeId = deps.presetStoreId ?? only?.id;
-          if (storeId) {
-            persist(storeId);
+          if (deps.presetStoreId) {
+            if (!isKnownStore(result.stores, deps.presetStoreId)) {
+              const available = result.stores.map((store) => store.id).join(", ") || "none";
+              html(
+                res,
+                400,
+                renderLoginForm(
+                  `Store "${deps.presetStoreId}" is not available to this account. ` +
+                    `Available store ids: ${available}.`
+                )
+              );
+              // A bad --store flag will not fix itself on retry — don't let the CLI hang forever.
+              settle(false);
+              return;
+            }
+            persist(deps.presetStoreId);
+            html(res, 200, renderDone());
+            settle(true);
+            return;
+          }
+
+          if (result.stores.length === 1) {
+            persist(result.stores[0].id);
             html(res, 200, renderDone());
             settle(true);
             return;
@@ -84,7 +113,7 @@ export const startLoginServer = (deps: LoginServerDeps): Promise<LoginServer> =>
 
         if (req.method === "POST" && req.url === "/select-store") {
           const body = await readBody(req);
-          if (!pending || !body.storeId) {
+          if (!pending || !body.storeId || !isKnownStore(pending.stores, body.storeId)) {
             html(res, 400, renderLoginForm("Log in again."));
             return;
           }
