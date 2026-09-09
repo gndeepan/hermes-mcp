@@ -327,6 +327,21 @@ describe("registerHermesTools", () => {
     expect(calledPath.endsWith("/custom-blocks")).toBe(true);
   });
 
+  it("refuses a dot-only segment however it got into the built path", async () => {
+    // Backstop for the per-parameter check: the guard holds on the built path.
+    const request = vi.fn(async () => ({ id: "w1" }));
+    const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
+
+    const result = await client.callTool({
+      name: "hermes_get_custom_block",
+      arguments: { storeId: "s1", id: ".." },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("INVALID_PATH_PARAM");
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it("never issues a request whose path still holds an unsubstituted placeholder", async () => {
     const request = vi.fn(async () => ({ id: "w1" }));
     const ctx = baseCtx({ createClient: () => ({ request }) });

@@ -40,12 +40,16 @@ interface BuiltRequest {
  */
 const DOT_ONLY = /^\.+$/;
 const UNSUBSTITUTED_PLACEHOLDER = /\{[^}]+\}/;
+const DOT_ONLY_SEGMENT = /(^|\/)\.+(\/|$)/;
 
 /**
- * The single check standing between caller input and the wire. Runs once, after
+ * The single check standing between a built path and the wire. Runs once, after
  * substitution, and covers both ways a path can stop being the allowlisted one:
- * a value that resolves the path away, and a placeholder left behind because a
- * live refresh dropped the parameter that used to fill it.
+ * a dot-only segment that `new URL()` would resolve away, and a placeholder
+ * left behind because a live refresh dropped the parameter that used to fill
+ * it. The per-parameter check in `buildRequest` catches the first case with a
+ * message naming the offending parameter; this is the backstop that holds
+ * whatever the substitution produced.
  */
 const assertAllowlistedPath = (compiled: CompiledEndpoint, path: string): void => {
   const leftover = UNSUBSTITUTED_PLACEHOLDER.exec(path);
@@ -53,6 +57,12 @@ const assertAllowlistedPath = (compiled: CompiledEndpoint, path: string): void =
     throw new InvalidPathParameterError(
       compiled.pathTemplate,
       `the path parameter ${leftover[0]} is not declared by the current OpenAPI schema for this operation, so it cannot be filled in`
+    );
+  }
+  if (DOT_ONLY_SEGMENT.test(path)) {
+    throw new InvalidPathParameterError(
+      compiled.pathTemplate,
+      "the resulting path contains a dot-only segment, which would resolve onto a different, non-allowlisted path"
     );
   }
 };
