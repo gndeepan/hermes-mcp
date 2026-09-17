@@ -75,11 +75,18 @@ export const compileEndpoint = (doc: OpenApiDocument, entry: EndpointDef): Compi
   }
 
   if (entry.hasBody) {
-    shape.body = z
-      .record(z.string(), z.unknown())
-      .describe(
-        entry.bodyDescription ?? "Request body. Hermes validates its shape; this tool does not re-validate it."
-      );
+    // `.meta()` rather than `.describe()`: Zod renders an unknown value type as
+    // `additionalProperties: {}`, the object-literal spelling of `true`, which
+    // schema-portability checkers (the MCP Inspector's `--strict` among them)
+    // flag as "carries no validation keyword at all". The body genuinely is
+    // free-form — Hermes validates its shape and this tool deliberately does
+    // not — so `additionalProperties: true` says that outright instead of by
+    // implication. Parsing behaviour is unchanged.
+    shape.body = z.record(z.string(), z.unknown()).meta({
+      description:
+        entry.bodyDescription ?? "Request body. Hermes validates its shape; this tool does not re-validate it.",
+      additionalProperties: true,
+    });
   }
 
   return { ...entry, inputSchema: z.object(shape), paramLocations };

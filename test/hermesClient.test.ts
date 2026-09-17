@@ -12,7 +12,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const credentials = { accessToken: "test-token", storeId: "store-1" };
+const user = { accessToken: "test-token", storeId: "store-1" };
 
 describe("HermesClient", () => {
   it("sends the credential headers and unwraps the {data} envelope", async () => {
@@ -21,11 +21,12 @@ describe("HermesClient", () => {
       const headers = init.headers as Record<string, string>;
       expect(headers.Authorization).toBe("Bearer test-token");
       expect(headers["X-Store-Id"]).toBe("store-1");
+      expect(headers["X-Request-ID"]).toBeUndefined();
       return new Response(JSON.stringify({ data: { id: "t1" } }), { status: 200 });
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const client = new HermesClient("https://hermes.test", credentials);
+    const client = new HermesClient("https://hermes.test", user);
     const result = await client.request("GET", "/api/v1/themes/active");
 
     expect(result).toEqual({ id: "t1" });
@@ -41,7 +42,7 @@ describe("HermesClient", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const client = new HermesClient("https://hermes.test", credentials);
+    const client = new HermesClient("https://hermes.test", user);
     await client.request("PUT", "/api/v1/widgets/w1", {
       query: { display: "true" },
       body: { display: true },
@@ -53,18 +54,18 @@ describe("HermesClient", () => {
       "fetch",
       vi.fn(async () => new Response(JSON.stringify([{ id: "1" }]), { status: 200 }))
     );
-    const client = new HermesClient("https://hermes.test", credentials);
+    const client = new HermesClient("https://hermes.test", user);
     expect(await client.request("GET", "/x")).toEqual([{ id: "1" }]);
   });
 
   it("returns null for a 204 and for an empty body", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
-    const client = new HermesClient("https://hermes.test", credentials);
+    const client = new HermesClient("https://hermes.test", user);
     expect(await client.request("DELETE", "/x")).toBeNull();
   });
 
   it("maps 401/403/404/4xx/5xx to their typed errors", async () => {
-    const client = new HermesClient("https://hermes.test", credentials);
+    const client = new HermesClient("https://hermes.test", user);
 
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 401 })));
     await expect(client.request("GET", "/x")).rejects.toThrow(HermesUnauthenticatedError);
@@ -89,18 +90,31 @@ describe("HermesClient", () => {
         throw new TypeError("network down");
       })
     );
-    const client = new HermesClient("https://hermes.test", credentials);
+    const client = new HermesClient("https://hermes.test", user);
     await expect(client.request("GET", "/x")).rejects.toThrow(HermesUnavailableError);
   });
 
   it("never puts the access token in a thrown error's message", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 401 })));
-    const client = new HermesClient("https://hermes.test", credentials);
+    const client = new HermesClient("https://hermes.test", user);
     try {
       await client.request("GET", "/api/v1/themes/active");
       throw new Error("expected a throw");
     } catch (err) {
       expect(String(err)).not.toContain("test-token");
     }
+  });
+
+  it("propagates the caller's request id as X-Request-ID when one is supplied", async () => {
+    const fetchMock = vi.fn(async (_url: URL, init: RequestInit) => {
+      expect((init.headers as Record<string, string>)["X-Request-ID"]).toBe("trace-1");
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new HermesClient("https://hermes.test", { ...user, requestId: "trace-1" });
+    await client.request("GET", "/api/v1/themes/active");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

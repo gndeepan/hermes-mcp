@@ -37,23 +37,23 @@ export class HermesUnavailableError extends Error {
 }
 
 /**
- * A non-2xx from one of Hermes's own auth endpoints. Carries the status so
- * callers can tell a rejected credential (401/403 — no token will work until a
- * fresh login) from a transport-level or server-side failure that says nothing
- * about the credential. Names only the path: the request that produced it may
- * have carried an OTP or a refresh token.
+ * No identity for this call. This server holds no credential of its own, so
+ * this is always the caller's omission — the message names exactly what to
+ * send rather than pointing at server-side state the caller cannot inspect.
  */
-export class HermesAuthError extends Error {
-  constructor(readonly path: string, readonly status: number) {
-    super(`Hermes ${path} failed with status ${status}`);
-    this.name = "HermesAuthError";
-  }
-}
-
 export class MissingCredentialsError extends Error {
   constructor() {
+    // The key names are spelled out rather than imported from `userContext`,
+    // which imports this module. `test/userContext.test.ts` asserts the two
+    // stay in step, so a renamed key cannot leave this message stale.
     super(
-      "This tool call has no valid Hermes credentials. Run `hermes-mcp-login`, or set HERMES_ACCESS_TOKEN and HERMES_STORE_ID."
+      [
+        "This tool call carried no Hermes credentials.",
+        "Send the end user's own credentials in this request's `_meta`:",
+        '"com.superfans.hermes/accessToken" and "com.superfans.hermes/storeId"',
+        '(optionally "com.superfans.hermes/requestId" for tracing).',
+        "For a single-user local run, set HERMES_ACCESS_TOKEN and HERMES_STORE_ID instead.",
+      ].join(" ")
     );
     this.name = "MissingCredentialsError";
   }

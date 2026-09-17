@@ -9,27 +9,6 @@ import { loadSnapshotDoc } from "./registry/snapshot.js";
 import { ENDPOINTS } from "./registry/endpoints.js";
 import { startOpenApiRefreshLoop } from "./openapiSync.js";
 import { HermesClient } from "./hermesClient.js";
-import { createTokenStore, type StoredCredentials } from "./auth/tokenStore.js";
-import { TokenManager } from "./auth/tokenManager.js";
-
-/**
- * Prefers a persisted login; falls back to the static env-var credential.
- * The env-var form has no refresh token and no known expiry, so it is seeded
- * with an infinite expiry — never proactively refreshed, but still able to fail
- * cleanly into MissingCredentialsError if Hermes rejects it.
- */
-const buildTokenManager = (config: HermesMcpConfig): TokenManager => {
-  const store = createTokenStore();
-  const fromEnv: StoredCredentials | null = config.credentials
-    ? {
-        accessToken: config.credentials.accessToken,
-        storeId: config.credentials.storeId,
-        refreshToken: "",
-        expiresAt: Number.POSITIVE_INFINITY,
-      }
-    : null;
-  return new TokenManager({ store, baseUrl: config.hermesBaseUrl }, store.read() ?? fromEnv);
-};
 
 /**
  * Builds a fully configured server without connecting it to a transport.
@@ -38,8 +17,7 @@ const buildTokenManager = (config: HermesMcpConfig): TokenManager => {
  */
 export const createServer = (
   config: HermesMcpConfig = loadConfig(),
-  logger: Logger = createLogger(config),
-  tokenManager: TokenManager = buildTokenManager(config)
+  logger: Logger = createLogger(config)
 ): McpServer => {
   const registry = SchemaRegistry.fromDocument(loadSnapshotDoc());
   const server = new McpServer({ name: config.serverName, version: config.serverVersion });
@@ -49,9 +27,8 @@ export const createServer = (
   const syncToolSchemas = registerHermesTools(server, {
     config,
     logger,
-    tokenManager,
     registry,
-    createClient: (credentials) => new HermesClient(config.hermesBaseUrl, credentials),
+    createClient: (user) => new HermesClient(config.hermesBaseUrl, user),
   });
 
   startOpenApiRefreshLoop(registry, config, logger, () => {

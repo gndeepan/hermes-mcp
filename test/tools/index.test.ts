@@ -7,24 +7,18 @@ import { loadSnapshotDoc } from "../../src/registry/snapshot.js";
 import { ENDPOINTS } from "../../src/registry/endpoints.js";
 import { createLogger } from "../../src/logging.js";
 import { loadConfig } from "../../src/config.js";
-import { TokenManager } from "../../src/auth/tokenManager.js";
-import type { StoredCredentials, TokenStore } from "../../src/auth/tokenStore.js";
 import type { HermesRequester } from "../../src/hermesClient.js";
 import type { OpenApiDocument } from "../../src/registry/schemaFromOpenApi.js";
 import { HermesNotFoundError, HermesUnauthenticatedError } from "../../src/errors.js";
+import { ACCESS_TOKEN_KEY, REQUEST_ID_KEY, STORE_ID_KEY } from "../../src/userContext.js";
+import { buildRequest } from "../../src/tools/index.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const noopStore: TokenStore = { read: () => null, write: () => {} };
-
-const validCredentials: StoredCredentials = {
-  accessToken: "t",
-  refreshToken: "r",
-  expiresAt: Date.now() + 3_600_000,
-  storeId: "s1",
-};
+/** What a well-behaved client attaches to every tools/call. */
+const CREDENTIAL_META = { [ACCESS_TOKEN_KEY]: "t", [STORE_ID_KEY]: "s1" };
 
 const buildServerAndClient = async (ctx: ToolContext): Promise<Client> => {
   const server = new McpServer({ name: "test", version: "0.0.0" });
@@ -38,7 +32,6 @@ const buildServerAndClient = async (ctx: ToolContext): Promise<Client> => {
 const baseCtx = (overrides: Partial<ToolContext> = {}): ToolContext => ({
   config: loadConfig({}),
   logger: createLogger({ logLevel: "silent" }),
-  tokenManager: new TokenManager({ store: noopStore, baseUrl: "https://hermes.test" }, validCredentials),
   registry: SchemaRegistry.fromDocument(loadSnapshotDoc()),
   createClient: () => ({ request: vi.fn() }) as HermesRequester,
   ...overrides,
@@ -89,21 +82,16 @@ describe("registerHermesTools", () => {
     const request = vi.fn(async () => ({ id: "w1", display: true }));
     const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
 
-    const result = await client.callTool({ name: "hermes_get_widget", arguments: { id: "w1" } });
+    const result = await client.callTool({ _meta: CREDENTIAL_META, name: "hermes_get_widget", arguments: { id: "w1" } });
 
     expect(result.isError).toBeFalsy();
     expect(request).toHaveBeenCalledWith("get", "/api/v1/widgets/w1", { query: {}, body: undefined });
     expect(JSON.parse(textOf(result))).toEqual({ id: "w1", display: true });
   });
 
-  it("returns MISSING_CREDENTIALS and never calls Hermes when no credentials are loaded", async () => {
+  it("returns MISSING_CREDENTIALS and never calls Hermes when the call carries no _meta", async () => {
     const request = vi.fn();
-    const client = await buildServerAndClient(
-      baseCtx({
-        tokenManager: new TokenManager({ store: noopStore, baseUrl: "https://hermes.test" }, null),
-        createClient: () => ({ request }),
-      })
-    );
+    const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
 
     const result = await client.callTool({ name: "hermes_get_widget", arguments: { id: "w1" } });
 
@@ -112,11 +100,78 @@ describe("registerHermesTools", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
+  it("returns MISSING_CREDENTIALS when _meta carries a token but no store id", async () => {
+    const request = vi.fn();
+    const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
+
+    const result = await client.callTool({
+      _meta: { [ACCESS_TOKEN_KEY]: "t" },
+      name: "hermes_get_widget",
+      arguments: { id: "w1" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("MISSING_CREDENTIALS");
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("builds the client from this call's own _meta, not from any process-wide state", async () => {
+    const request = vi.fn(async () => ({ id: "w1" }));
+    const seen: unknown[] = [];
+    const client = await buildServerAndClient(
+      baseCtx({
+        createClient: (user) => {
+          seen.push(user);
+          return { request };
+        },
+      })
+    );
+
+    await client.callTool({
+      _meta: { [ACCESS_TOKEN_KEY]: "token-a", [STORE_ID_KEY]: "store-a", [REQUEST_ID_KEY]: "req-a" },
+      name: "hermes_get_widget",
+      arguments: { id: "w1" },
+    });
+    await client.callTool({
+      _meta: { [ACCESS_TOKEN_KEY]: "token-b", [STORE_ID_KEY]: "store-b" },
+      name: "hermes_get_widget",
+      arguments: { id: "w1" },
+    });
+
+    expect(seen).toEqual([
+      { accessToken: "token-a", storeId: "store-a", requestId: "req-a" },
+      { accessToken: "token-b", storeId: "store-b" },
+    ]);
+  });
+
+  it("falls back to the env-var credential only when the call carries none", async () => {
+    const request = vi.fn(async () => ({ id: "w1" }));
+    const seen: unknown[] = [];
+    const client = await buildServerAndClient(
+      baseCtx({
+        config: loadConfig({ HERMES_ACCESS_TOKEN: "env-token", HERMES_STORE_ID: "env-store" }),
+        createClient: (user) => {
+          seen.push(user);
+          return { request };
+        },
+      })
+    );
+
+    await client.callTool({ name: "hermes_get_widget", arguments: { id: "w1" } });
+    await client.callTool({ _meta: CREDENTIAL_META, name: "hermes_get_widget", arguments: { id: "w1" } });
+
+    expect(seen).toEqual([
+      { accessToken: "env-token", storeId: "env-store" },
+      { accessToken: "t", storeId: "s1" },
+    ]);
+  });
+
   it("separates path params from query params for hermes_list_custom_blocks", async () => {
     const request = vi.fn(async () => ({ items: [] }));
     const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
 
     await client.callTool({
+      _meta: CREDENTIAL_META,
       name: "hermes_list_custom_blocks",
       arguments: { storeId: "s1", page: 1, contentType: "HTML" },
     });
@@ -139,6 +194,7 @@ describe("registerHermesTools", () => {
     };
 
     await client.callTool({
+      _meta: CREDENTIAL_META,
       name: "hermes_create_custom_block",
       arguments: { storeId: "s1", body },
     });
@@ -152,58 +208,29 @@ describe("registerHermesTools", () => {
     });
     const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
 
-    const result = await client.callTool({ name: "hermes_get_widget", arguments: { id: "missing" } });
+    const result = await client.callTool({ _meta: CREDENTIAL_META, name: "hermes_get_widget", arguments: { id: "missing" } });
 
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("NOT_FOUND");
   });
 
-  it("refreshes the token once and retries on a 401, succeeding on the retry", async () => {
-    let calls = 0;
-    const request = vi.fn(async () => {
-      calls += 1;
-      if (calls === 1) throw new HermesUnauthenticatedError("/api/v1/widgets/w1");
-      return { id: "w1" };
-    });
-    const refresh = vi.fn(async () => ({
-      accessToken: "a2",
-      refreshToken: "r2",
-      expiresAt: Date.now() + 3_600_000,
-    }));
-    const tokenManager = new TokenManager(
-      { store: noopStore, baseUrl: "https://hermes.test", refresh },
-      validCredentials
-    );
-    const client = await buildServerAndClient(baseCtx({ tokenManager, createClient: () => ({ request }) }));
-
-    const result = await client.callTool({ name: "hermes_get_widget", arguments: { id: "w1" } });
-
-    expect(result.isError).toBeFalsy();
-    expect(request).toHaveBeenCalledTimes(2);
-    expect(refresh).toHaveBeenCalledTimes(1);
-  });
-
-  it("gives up after exactly one retry and surfaces UNAUTHENTICATED", async () => {
+  it("surfaces a 401 to the caller without retrying — this server cannot mint a token", async () => {
+    // The caller owns the credential's lifetime, exactly as in the AI Server:
+    // a rejected session is their answer to act on, not something to paper over.
     const request = vi.fn(async () => {
       throw new HermesUnauthenticatedError("/api/v1/widgets/w1");
     });
-    const refresh = vi.fn(async () => ({
-      accessToken: "a2",
-      refreshToken: "r2",
-      expiresAt: Date.now() + 3_600_000,
-    }));
-    const tokenManager = new TokenManager(
-      { store: noopStore, baseUrl: "https://hermes.test", refresh },
-      validCredentials
-    );
-    const client = await buildServerAndClient(baseCtx({ tokenManager, createClient: () => ({ request }) }));
+    const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
 
-    const result = await client.callTool({ name: "hermes_get_widget", arguments: { id: "w1" } });
+    const result = await client.callTool({
+      _meta: CREDENTIAL_META,
+      name: "hermes_get_widget",
+      arguments: { id: "w1" },
+    });
 
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("UNAUTHENTICATED");
-    expect(request).toHaveBeenCalledTimes(2);
-    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(1);
   });
 
   it("logs a debug line and an info line sharing one traceId per call", async () => {
@@ -212,7 +239,7 @@ describe("registerHermesTools", () => {
     const request = vi.fn(async () => ({ id: "w1" }));
     const client = await buildServerAndClient(baseCtx({ logger, createClient: () => ({ request }) }));
 
-    await client.callTool({ name: "hermes_get_widget", arguments: { id: "w1" } });
+    await client.callTool({ _meta: CREDENTIAL_META, name: "hermes_get_widget", arguments: { id: "w1" } });
 
     const parsed = lines.map((l) => JSON.parse(l) as Record<string, unknown>);
     const start = parsed.find((p) => p.message === "tool call start");
@@ -258,6 +285,7 @@ describe("registerHermesTools", () => {
     expect(after.required).toContain("revision");
 
     const result = await client.callTool({
+      _meta: CREDENTIAL_META,
       name: "hermes_get_widget",
       arguments: { id: "w1", revision: "v2" },
     });
@@ -302,6 +330,7 @@ describe("registerHermesTools", () => {
       const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
 
       const result = await client.callTool({
+      _meta: CREDENTIAL_META,
         name: "hermes_create_custom_block",
         arguments: { storeId, body: { name: "n" } },
       });
@@ -317,6 +346,7 @@ describe("registerHermesTools", () => {
     const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
 
     await client.callTool({
+      _meta: CREDENTIAL_META,
       name: "hermes_list_custom_blocks",
       arguments: { storeId: "{storeId}", page: 1 },
     });
@@ -333,6 +363,7 @@ describe("registerHermesTools", () => {
     const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
 
     const result = await client.callTool({
+      _meta: CREDENTIAL_META,
       name: "hermes_get_custom_block",
       arguments: { storeId: "s1", id: ".." },
     });
@@ -354,6 +385,7 @@ describe("registerHermesTools", () => {
     syncToolSchemas();
 
     const result = await client.callTool({
+      _meta: CREDENTIAL_META,
       name: "hermes_update_widget",
       arguments: { body: { display: true } },
     });
@@ -377,3 +409,41 @@ describe("registerHermesTools", () => {
     expect(result.isError).toBe(true);
   });
 });
+
+describe("paged list endpoints", () => {
+  it("sends page 1 when the caller omits it", async () => {
+    // Hermes answers a paged list with no page as 404, not 400, so an omitted
+    // page reads as "this store has no blocks" rather than as a bad request.
+    const compiled = {
+      pathTemplate: "/api/v1/stores/{storeId}/custom-blocks",
+      paramLocations: { storeId: "path", page: "query" },
+      hasBody: false,
+    } as never;
+
+    const { query } = buildRequest(compiled, { storeId: "1234" });
+    expect(query.page).toBe("1");
+  });
+
+  it("keeps the page the caller asked for", () => {
+    const compiled = {
+      pathTemplate: "/api/v1/stores/{storeId}/custom-blocks",
+      paramLocations: { storeId: "path", page: "query" },
+      hasBody: false,
+    } as never;
+
+    const { query } = buildRequest(compiled, { storeId: "1234", page: 3 });
+    expect(query.page).toBe("3");
+  });
+
+  it("adds no page to an endpoint that does not take one", () => {
+    const compiled = {
+      pathTemplate: "/api/v1/stores/{storeId}/themes/active",
+      paramLocations: { storeId: "path" },
+      hasBody: false,
+    } as never;
+
+    const { query } = buildRequest(compiled, { storeId: "1234" });
+    expect("page" in query).toBe(false);
+  });
+});
+

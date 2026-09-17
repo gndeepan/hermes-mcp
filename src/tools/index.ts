@@ -6,22 +6,26 @@ import type { HermesMcpConfig } from "../config.js";
 import type { SchemaRegistry } from "../registry/schemaRegistry.js";
 import type { CompiledEndpoint } from "../registry/schemaFromOpenApi.js";
 import { ENDPOINTS } from "../registry/endpoints.js";
-import type { Credentials, HermesRequester } from "../hermesClient.js";
-import type { TokenManager } from "../auth/tokenManager.js";
+import type { HermesRequester } from "../hermesClient.js";
+import { userContextFrom, type UserContext } from "../userContext.js";
 import { fetchOpenApiDoc } from "../openapiSync.js";
-import {
-  HermesUnauthenticatedError,
-  InvalidPathParameterError,
-  toToolResult,
-  type ToolResult,
-} from "../errors.js";
+import { InvalidPathParameterError, toToolResult, type ToolResult } from "../errors.js";
 
 export interface ToolContext {
   config: HermesMcpConfig;
   logger: Logger;
-  tokenManager: TokenManager;
   registry: SchemaRegistry;
-  createClient: (credentials: Credentials) => HermesRequester;
+  createClient: (user: UserContext) => HermesRequester;
+}
+
+/**
+ * The slice of the MCP SDK's per-request context this server uses: the `_meta`
+ * the client attached to *this* `tools/call`, which is where the caller's
+ * Hermes credentials arrive. Declared structurally rather than imported so the
+ * handlers stay unit-testable without standing up a transport.
+ */
+export interface CallContext {
+  mcpReq?: { _meta?: Record<string, unknown> };
 }
 
 interface BuiltRequest {
@@ -67,7 +71,10 @@ const assertAllowlistedPath = (compiled: CompiledEndpoint, path: string): void =
   }
 };
 
-const buildRequest = (compiled: CompiledEndpoint, args: Record<string, unknown>): BuiltRequest => {
+export const buildRequest = (
+  compiled: CompiledEndpoint,
+  args: Record<string, unknown>
+): BuiltRequest => {
   let path = compiled.pathTemplate;
   const query: Record<string, string> = {};
   for (const [name, location] of Object.entries(compiled.paramLocations)) {
@@ -86,6 +93,15 @@ const buildRequest = (compiled: CompiledEndpoint, args: Record<string, unknown>)
       query[name] = String(value);
     }
   }
+  // Hermes rejects a paged list with no page as 404, not 400, so an omitted
+  // page looks like "this store has no custom blocks" rather than like a
+  // malformed request. The published schema marks page required, but the
+  // live-refreshed one does not always agree, and a list call wants the first
+  // page in every case — so supply it rather than depend on which spec won.
+  if (compiled.paramLocations.page === "query" && query.page === undefined) {
+    query.page = "1";
+  }
+
   assertAllowlistedPath(compiled, path);
   return { path, query, body: compiled.hasBody ? args.body : undefined };
 };
@@ -93,32 +109,36 @@ const buildRequest = (compiled: CompiledEndpoint, args: Record<string, unknown>)
 type ToolReturn = ToolResult | { content: [{ type: "text"; text: string }] };
 
 /**
- * The single seam where every cross-cutting concern lives: credential
- * resolution, the one-shot refresh-and-retry on a 401, tracing, timing, and
- * failure mapping. `HermesClient` stays a pure transport precisely so all of
- * this can live here, once.
+ * The single seam where every cross-cutting concern lives: resolving the
+ * caller's identity from this call's `_meta`, tracing, timing, and failure
+ * mapping. `HermesClient` stays a pure transport precisely so all of this can
+ * live here, once.
+ *
+ * There is no refresh-and-retry: this server owns no credential and cannot
+ * mint a new one, so a 401 is the caller's own session being rejected and is
+ * surfaced to them unchanged — the same contract the AI Server's `HermesClient`
+ * keeps.
  */
 const wrap =
   (toolName: string, method: string, ctx: ToolContext) =>
-  async (args: Record<string, unknown>): Promise<ToolReturn> => {
+  async (args: Record<string, unknown>, call: CallContext): Promise<ToolReturn> => {
     const start = Date.now();
     const traceId = randomBytes(4).toString("hex");
     try {
       const compiled = ctx.registry.get(toolName);
       const { path, query, body } = buildRequest(compiled, args);
-      const credentials = await ctx.tokenManager.getValidCredentials();
+      const user = userContextFrom(call?.mcpReq?._meta, ctx.config.credentials);
 
-      ctx.logger.debug("tool call start", { tool: toolName, traceId, method, path, query });
+      ctx.logger.debug("tool call start", {
+        tool: toolName,
+        traceId,
+        method,
+        path,
+        query,
+        storeId: user.storeId,
+      });
 
-      let data: unknown;
-      try {
-        data = await ctx.createClient(credentials).request(method, path, { query, body });
-      } catch (err) {
-        if (!(err instanceof HermesUnauthenticatedError)) throw err;
-        ctx.logger.debug("tool call retrying after 401", { tool: toolName, traceId });
-        const refreshed = await ctx.tokenManager.forceRefresh();
-        data = await ctx.createClient(refreshed).request(method, path, { query, body });
-      }
+      const data = await ctx.createClient(user).request(method, path, { query, body });
 
       ctx.logger.info("tool call ok", { tool: toolName, traceId, durationMs: Date.now() - start });
       return { content: [{ type: "text", text: JSON.stringify(data) }] };
@@ -161,7 +181,7 @@ const registerRefreshTool = (
     REFRESH_TOOL,
     {
       description:
-        "Refresh every hermes_* tool's input schema from the live Hermes OpenAPI document, without waiting for the background interval. Returns how many tool schemas were recompiled and which ones actually changed.",
+        "Recompile every other hermes_* tool's input schema from Hermes's live OpenAPI document, without waiting for the background refresh interval. Takes no arguments and touches no store data — it only re-reads the API specification, so it is safe to call at any time. Returns how many tool schemas were recompiled and the names of the ones that actually changed; any change is also re-advertised to you immediately, so re-read the tool list afterwards. Reach for this when a hermes_* call is rejected for an argument you believe is correct, which can mean Hermes has changed that endpoint since this server started. It cannot add or remove tools — only the allowlisted operations exist, whatever the specification says.",
       inputSchema: z.object({}),
     },
     (async (): Promise<ToolReturn> => {

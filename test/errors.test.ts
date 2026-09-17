@@ -54,9 +54,11 @@ describe("toToolResult", () => {
     );
   });
 
-  it("MissingCredentialsError names both the login command and the env var fallback", () => {
+  it("MissingCredentialsError names both the _meta keys and the env var fallback", () => {
     const err = new MissingCredentialsError();
-    expect(err.message).toContain("hermes-mcp-login");
+    expect(err.message).toContain("_meta");
+    expect(err.message).toContain("com.superfans.hermes/accessToken");
+    expect(err.message).toContain("com.superfans.hermes/storeId");
     expect(err.message).toContain("HERMES_ACCESS_TOKEN");
   });
 

@@ -10,6 +10,11 @@ export interface HermesMcpConfig {
   openApiDocsUrl: string;
   openApiRefreshIntervalS: number;
   openApiFetchTimeoutMs: number;
+  /**
+   * A single-user fallback identity for local runs and CI, used only when a
+   * tool call carries no credentials in its `_meta`. A real client sends its
+   * own per-request credentials, which always win over this.
+   */
   credentials: { accessToken: string; storeId: string } | null;
 }
 

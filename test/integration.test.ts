@@ -6,14 +6,11 @@ import { createServer } from "../src/server.js";
 import { createLogger } from "../src/logging.js";
 import { loadConfig } from "../src/config.js";
 import { ENDPOINTS } from "../src/registry/endpoints.js";
-import { TokenManager } from "../src/auth/tokenManager.js";
-import type { StoredCredentials, TokenStore } from "../src/auth/tokenStore.js";
+import { ACCESS_TOKEN_KEY, REQUEST_ID_KEY, STORE_ID_KEY } from "../src/userContext.js";
 
-const noopStore: TokenStore = { read: () => null, write: () => {} };
-
-const connect = async (tokenManager: TokenManager, name: string): Promise<Client> => {
+const connect = async (name: string): Promise<Client> => {
   const config = loadConfig({ HERMES_MCP_LOG_LEVEL: "silent" });
-  const server = createServer(config, createLogger(config, () => {}), tokenManager);
+  const server = createServer(config, createLogger(config, () => {}));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name, version: "1.0.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -31,10 +28,7 @@ let client: Client;
 
 beforeAll(async () => {
   stubDocsOnlyFetch();
-  client = await connect(
-    new TokenManager({ store: noopStore, baseUrl: "https://hermes.test" }, null),
-    "integration-test"
-  );
+  client = await connect("integration-test");
 });
 
 afterEach(() => {
@@ -48,45 +42,59 @@ describe("tools/list", () => {
       [...ENDPOINTS.map((e) => e.toolName), "hermes_refresh_openapi"].sort()
     );
     for (const tool of tools) {
-      expect(tool.description?.length ?? 0).toBeGreaterThan(5);
+      // A description is the only thing a model sees before picking a tool, so
+      // a stub like "Get one page by id." is treated as a missing description.
+      expect(tool.description?.length ?? 0).toBeGreaterThan(120);
       expect(tool.inputSchema).toBeTypeOf("object");
     }
   });
 });
 
 describe("credentials", () => {
-  it("rejects a Hermes-backed tool call with MISSING_CREDENTIALS when nothing is loaded", async () => {
+  it("rejects a Hermes-backed tool call with MISSING_CREDENTIALS when the call carries none", async () => {
     const result = await client.callTool({ name: "hermes_get_active_theme", arguments: {} });
     expect(result.isError).toBe(true);
     expect((result.content as { text: string }[])[0].text).toContain("MISSING_CREDENTIALS");
   });
+
+  it("names the _meta keys to send, so the caller can fix the call from the error alone", async () => {
+    const result = await client.callTool({ name: "hermes_get_active_theme", arguments: {} });
+    const text = (result.content as { text: string }[])[0].text;
+    expect(text).toContain(ACCESS_TOKEN_KEY);
+    expect(text).toContain(STORE_ID_KEY);
+  });
 });
 
-describe("an end-to-end call through the real TokenManager and HermesClient", () => {
-  it("calls hermes_get_active_theme and unwraps the {data} envelope", async () => {
+describe("an end-to-end call carrying the caller's credentials in _meta", () => {
+  it("turns _meta into Hermes headers and unwraps the {data} envelope", async () => {
+    const sent: Record<string, string>[] = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (url: URL) =>
-        String(url).endsWith("/v3/api-docs")
-          ? new Response(JSON.stringify({ paths: {} }), { status: 200 })
-          : new Response(JSON.stringify({ data: { id: "theme-1" } }), { status: 200 })
-      )
+      vi.fn(async (url: URL, init: RequestInit) => {
+        if (String(url).endsWith("/v3/api-docs")) {
+          return new Response(JSON.stringify({ paths: {} }), { status: 200 });
+        }
+        sent.push(init.headers as Record<string, string>);
+        return new Response(JSON.stringify({ data: { id: "theme-1" } }), { status: 200 });
+      })
     );
-    const credentials: StoredCredentials = {
-      accessToken: "test-token",
-      refreshToken: "r",
-      expiresAt: Date.now() + 3_600_000,
-      storeId: "store-1",
-    };
-    const authed = await connect(
-      new TokenManager({ store: noopStore, baseUrl: "https://hermes.test" }, credentials),
-      "authed-test-client"
-    );
+    const authed = await connect("authed-test-client");
 
-    const result = await authed.callTool({ name: "hermes_get_active_theme", arguments: {} });
+    const result = await authed.callTool({
+      _meta: {
+        [ACCESS_TOKEN_KEY]: "test-token",
+        [STORE_ID_KEY]: "store-1",
+        [REQUEST_ID_KEY]: "trace-1",
+      },
+      name: "hermes_get_active_theme",
+      arguments: {},
+    });
 
     expect(result.isError).toBeFalsy();
     expect(JSON.parse((result.content as { text: string }[])[0].text)).toEqual({ id: "theme-1" });
+    expect(sent[0].Authorization).toBe("Bearer test-token");
+    expect(sent[0]["X-Store-Id"]).toBe("store-1");
+    expect(sent[0]["X-Request-ID"]).toBe("trace-1");
   });
 });
 

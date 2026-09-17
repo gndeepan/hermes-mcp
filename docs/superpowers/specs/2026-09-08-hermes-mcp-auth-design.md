@@ -1,9 +1,18 @@
 # hermes-mcp — auth, tracing & refresh extension
 
 Date: 2026-09-08
-Status: approved, pre-implementation
+Status: **partly superseded** — see the note below
 Extends: `2026-09-08-hermes-mcp-design.md` (the base spec — read that first; this
 document only covers what it adds or changes)
+
+> **Superseded (2026-09-16).** The browser login (item 1) and the persisted-token
+> lifecycle (item 2) described here were removed. `hermes-mcp` now holds no
+> identity of its own: the client sends the end user's access token and store id
+> in each `tools/call`'s `_meta`, the way `ai-server`'s `HermesClient` carries a
+> per-request `UserContext`. Because the server owns no credential, it cannot
+> refresh one — a 401 is surfaced to the caller instead of retried. Items 3
+> (tracing) and 4 stand, with the correlation id now also accepting the caller's
+> own `com.superfans.hermes/requestId`. See `README.md` for the current contract.
 
 ## What this adds
 

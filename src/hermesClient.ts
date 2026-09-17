@@ -5,11 +5,7 @@ import {
   HermesUnauthenticatedError,
   HermesUnavailableError,
 } from "./errors.js";
-
-export interface Credentials {
-  accessToken: string;
-  storeId: string;
-}
+import { headersFor, type UserContext } from "./userContext.js";
 
 export interface RequestOptions {
   query?: Record<string, string>;
@@ -20,10 +16,15 @@ export interface HermesRequester {
   request(method: string, path: string, options?: RequestOptions): Promise<unknown>;
 }
 
+/**
+ * A pure transport: one user's credentials, one base URL, no retry and no
+ * credential lifecycle. Everything cross-cutting (tracing, timing, failure
+ * mapping) lives in the tool wrapper, so this stays trivially testable.
+ */
 export class HermesClient implements HermesRequester {
   constructor(
     private readonly baseUrl: string,
-    private readonly credentials: Credentials,
+    private readonly user: UserContext,
     private readonly timeoutMs = 20_000
   ) {}
 
@@ -40,9 +41,7 @@ export class HermesClient implements HermesRequester {
       response = await fetch(url, {
         method: method.toUpperCase(),
         headers: {
-          Authorization: `Bearer ${this.credentials.accessToken}`,
-          "X-Store-Id": this.credentials.storeId,
-          Accept: "application/json",
+          ...headersFor(this.user),
           ...(options.body !== undefined ? { "Content-Type": "application/json" } : {}),
         },
         body: options.body !== undefined ? JSON.stringify(options.body) : undefined,

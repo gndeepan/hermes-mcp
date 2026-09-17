@@ -4,8 +4,7 @@
   "private": true,
   "type": "module",
   "bin": {
-    "hermes-mcp": "./dist/server.js",
-    "hermes-mcp-login": "./dist/login.js"
+    "hermes-mcp": "./dist/server.js"
   },
   "engines": {
     "node": ">=20"
@@ -13,18 +12,21 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "start": "node dist/server.js",
-    "login": "node dist/login.js",
+    "inspect": "npm run build && node scripts/inspect.mjs --web",
+    "inspect:cli": "npm run build && node scripts/inspect.mjs --cli",
+    "inspect:tui": "npm run build && node scripts/inspect.mjs --tui",
+    "inspect:smoke": "npm run build && node scripts/inspect-smoke.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
-    "env-paths": "^3.0.0",
     "zod": "^4.5.4"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/inspector": "^2.6.0",
     "@types/node": "^20.14.0",
     "esbuild": "^0.28.2",
     "typescript": "^5.7.3",
