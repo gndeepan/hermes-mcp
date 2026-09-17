@@ -17,9 +17,31 @@ export interface HermesRequester {
 }
 
 /**
- * A pure transport: one user's credentials, one base URL, no retry and no
- * credential lifecycle. Everything cross-cutting (tracing, timing, failure
- * mapping) lives in the tool wrapper, so this stays trivially testable.
+ * Methods it is safe to send twice.
+ *
+ * The distinction is the whole of the retry design. A transport failure means
+ * no response came back — it does NOT mean the request never arrived. Hermes
+ * may have created the block and lost the reply on the way home, so retrying a
+ * POST risks two blocks where the merchant asked for one. A GET or a PUT
+ * repeated has the same effect as sent once, so those are safe and a create is
+ * not.
+ */
+const IDEMPOTENT = new Set(["GET", "HEAD", "PUT", "DELETE"]);
+
+/** Waits between attempts. Short: a merchant is watching a spinner. */
+const BACKOFF_MS = [250, 1_000];
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * A pure transport: one user's credentials, one base URL, no credential
+ * lifecycle. Everything else cross-cutting (tracing, timing, failure mapping)
+ * lives in the tool wrapper, so this stays trivially testable.
+ *
+ * It does retry, because the network under it is not reliable and a single
+ * dropped connection should not fail a merchant's action. Measured against the
+ * dev host: two attempts in five timed out while the other three answered in
+ * under nine seconds. Retrying turns that into an action that works.
  */
 export class HermesClient implements HermesRequester {
   constructor(
@@ -29,6 +51,33 @@ export class HermesClient implements HermesRequester {
   ) {}
 
   async request(method: string, path: string, options: RequestOptions = {}): Promise<unknown> {
+    // One extra attempt per backoff entry, and only when repeating the request
+    // cannot change what it does.
+    const attempts = IDEMPOTENT.has(method.toUpperCase()) ? BACKOFF_MS.length + 1 : 1;
+
+    let lastFailure: unknown;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (attempt > 0) await sleep(BACKOFF_MS[attempt - 1]!);
+
+      try {
+        return await this.attempt(method, path, options);
+      } catch (err) {
+        // Only a failure to get an answer is worth repeating. A 401, a 404 or a
+        // rejected payload IS the answer, and asking again produces the same
+        // one more slowly.
+        if (!(err instanceof HermesUnavailableError)) throw err;
+        lastFailure = err;
+      }
+    }
+
+    throw lastFailure;
+  }
+
+  private async attempt(
+    method: string,
+    path: string,
+    options: RequestOptions
+  ): Promise<unknown> {
     const url = new URL(path, this.baseUrl);
     for (const [key, value] of Object.entries(options.query ?? {})) {
       url.searchParams.set(key, value);
@@ -48,7 +97,11 @@ export class HermesClient implements HermesRequester {
         signal: controller.signal,
       });
     } catch (err) {
-      throw new HermesUnavailableError(path, err);
+      // The host, not just the path. "Hermes is unreachable calling
+      // /api/v1/..." reads the same whether it is pointed at the real service
+      // or at a local stub someone left configured, and those need opposite
+      // fixes.
+      throw new HermesUnavailableError(`${url.origin}${path}`, err);
     } finally {
       clearTimeout(timer);
     }

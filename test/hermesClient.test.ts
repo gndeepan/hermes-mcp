@@ -118,3 +118,123 @@ describe("HermesClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * The network under this client is not reliable.
+ *
+ * Measured against the dev host: two attempts in five timed out while the other
+ * three answered in under nine seconds. A single dropped connection must not
+ * fail a merchant's action — but repeating the wrong request is worse than
+ * failing, so what may be repeated is the careful part.
+ */
+describe("HermesClient retries", () => {
+  const unreachable = () => {
+    throw new TypeError("fetch failed");
+  };
+
+  const ok = (body: unknown = { id: "cbk_1" }) =>
+    new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  it("retries a GET that could not reach Hermes, and succeeds", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      if (calls < 3) unreachable();
+      return ok({ theme: "t" });
+    }));
+
+    const client = new HermesClient("https://hermes.test", user);
+    await expect(client.request("get", "/api/v1/themes/active")).resolves.toEqual({ theme: "t" });
+    expect(calls).toBe(3);
+  });
+
+  /**
+   * The rule that matters most.
+   *
+   * A transport failure means no response came back — NOT that the request
+   * never arrived. Hermes may have created the block and lost the reply, so a
+   * repeated POST risks two blocks where the merchant asked for one.
+   */
+  it("never repeats a POST, because a lost reply is not a lost request", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      unreachable();
+    }));
+
+    const client = new HermesClient("https://hermes.test", user);
+    await expect(client.request("post", "/api/v1/stores/s1/custom-blocks", { body: {} })).rejects.toBeInstanceOf(
+      HermesUnavailableError,
+    );
+    expect(calls).toBe(1);
+  });
+
+  it("retries a PUT, which replaces content and so is safe to repeat", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      if (calls < 2) unreachable();
+      return ok();
+    }));
+
+    const client = new HermesClient("https://hermes.test", user);
+    await expect(client.request("put", "/api/v1/stores/s1/custom-blocks/b1", { body: {} })).resolves.toEqual({
+      id: "cbk_1",
+    });
+    expect(calls).toBe(2);
+  });
+
+  it("gives up after a bounded number of attempts rather than hanging on", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      unreachable();
+    }));
+
+    const client = new HermesClient("https://hermes.test", user);
+    await expect(client.request("get", "/api/v1/themes/active")).rejects.toBeInstanceOf(
+      HermesUnavailableError,
+    );
+    expect(calls).toBe(3);
+  });
+
+  it("does not retry a 401, because that is an answer", async () => {
+    // Asking again produces the same answer more slowly, and delays telling
+    // the merchant the one thing they can act on.
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      return new Response("", { status: 401 });
+    }));
+
+    const client = new HermesClient("https://hermes.test", user);
+    await expect(client.request("get", "/api/v1/themes/active")).rejects.toBeInstanceOf(
+      HermesUnauthenticatedError,
+    );
+    expect(calls).toBe(1);
+  });
+
+  it("does not retry a rejected payload", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      return new Response("bad name", { status: 422 });
+    }));
+
+    const client = new HermesClient("https://hermes.test", user);
+    await expect(client.request("post", "/api/v1/stores/s1/custom-blocks", { body: {} })).rejects.toBeInstanceOf(
+      HermesRejectedError,
+    );
+    expect(calls).toBe(1);
+  });
+
+  it("names the host it could not reach, not only the path", async () => {
+    // "Hermes is unreachable calling /api/v1/..." reads identically whether it
+    // is pointed at the real service or at a local stub someone left
+    // configured, and those need opposite fixes.
+    vi.stubGlobal("fetch", vi.fn(async () => unreachable()));
+
+    const client = new HermesClient("https://hermes.test", user);
+    await expect(client.request("get", "/api/v1/themes/active")).rejects.toThrow(/hermes\.test/);
+  });
+});
