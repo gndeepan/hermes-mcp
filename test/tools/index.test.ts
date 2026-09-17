@@ -342,19 +342,23 @@ describe("registerHermesTools", () => {
   );
 
   it("keeps a literal {placeholder} value inside its own path segment", async () => {
-    const request = vi.fn(async () => ({ items: [] }));
+    // Asserted on `id` rather than `storeId`: a call may only ever name the
+    // store it authenticated as, so a literal "{storeId}" is now refused before
+    // it can reach the path builder. The encoding property is the same either
+    // way, and testing it on a non-tenant parameter keeps the two rules from
+    // masking each other.
+    const request = vi.fn(async () => ({ id: "b1" }));
     const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
 
     await client.callTool({
       _meta: CREDENTIAL_META,
-      name: "hermes_list_custom_blocks",
-      arguments: { storeId: "{storeId}", page: 1 },
+      name: "hermes_get_custom_block",
+      arguments: { storeId: "s1", id: "{id}" },
     });
 
     const [, calledPath] = request.mock.calls[0] as unknown as [string, string];
-    expect(calledPath).toBe("/api/v1/stores/%7BstoreId%7D/custom-blocks");
+    expect(calledPath).toBe("/api/v1/stores/s1/custom-blocks/%7Bid%7D");
     expect(calledPath).not.toMatch(/\{[^}]+\}/);
-    expect(calledPath.endsWith("/custom-blocks")).toBe(true);
   });
 
   it("refuses a dot-only segment however it got into the built path", async () => {
@@ -447,3 +451,138 @@ describe("paged list endpoints", () => {
   });
 });
 
+/**
+ * The properties a shared, multi-user process rests on.
+ *
+ * None of these mattered while one process served one merchant over stdio. All
+ * of them matter the moment a single process answers for many, and each one
+ * fails by returning somebody else's data rather than by erroring — which is
+ * why they are asserted rather than reasoned about.
+ */
+describe("serving more than one merchant", () => {
+  it("keeps concurrent calls with different credentials isolated", async () => {
+    // The headline property. Interleaved on purpose: a client cached anywhere
+    // between the two would show up as one identity serving both calls.
+    const seen: unknown[] = [];
+    const request = vi.fn(async () => ({ ok: true }));
+    const client = await buildServerAndClient(
+      baseCtx({
+        createClient: (user) => {
+          seen.push({ ...user });
+          return { request };
+        },
+      })
+    );
+
+    await Promise.all([
+      client.callTool({
+        _meta: { [ACCESS_TOKEN_KEY]: "token-a", [STORE_ID_KEY]: "store-a" },
+        name: "hermes_get_active_theme",
+        arguments: {},
+      }),
+      client.callTool({
+        _meta: { [ACCESS_TOKEN_KEY]: "token-b", [STORE_ID_KEY]: "store-b" },
+        name: "hermes_get_active_theme",
+        arguments: {},
+      }),
+    ]);
+
+    expect(seen).toHaveLength(2);
+    expect(seen).toContainEqual({ accessToken: "token-a", storeId: "store-a" });
+    expect(seen).toContainEqual({ accessToken: "token-b", storeId: "store-b" });
+  });
+
+  it("refuses a call naming a store it did not authenticate as", async () => {
+    // `storeId` arrives twice — as the argument steering the path, and as the
+    // identity behind the token. Nothing used to make them agree.
+    const request = vi.fn();
+    const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
+
+    const result = await client.callTool({
+      _meta: { [ACCESS_TOKEN_KEY]: "token-a", [STORE_ID_KEY]: "store-a" },
+      name: "hermes_get_custom_block",
+      arguments: { storeId: "store-b", id: "cbk_1" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("STORE_MISMATCH");
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("allows the call when the named store is the authenticated one", async () => {
+    const request = vi.fn(async () => ({ id: "cbk_1" }));
+    const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
+
+    const result = await client.callTool({
+      _meta: { [ACCESS_TOKEN_KEY]: "token-a", [STORE_ID_KEY]: "store-a" },
+      name: "hermes_get_custom_block",
+      arguments: { storeId: "store-a", id: "cbk_1" },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(request).toHaveBeenCalled();
+  });
+
+  it("compares a numeric store id by value, not by type", async () => {
+    // The MCP Inspector JSON-parses `--tool-metadata storeId=1234` into a
+    // number, so `_meta` carries 1234 while the argument is the string the
+    // tool schema requires. A strict comparison would refuse a caller acting
+    // entirely legitimately.
+    const request = vi.fn(async () => ({ items: [] }));
+    const client = await buildServerAndClient(baseCtx({ createClient: () => ({ request }) }));
+
+    const result = await client.callTool({
+      _meta: { [ACCESS_TOKEN_KEY]: "t", [STORE_ID_KEY]: 1234 },
+      name: "hermes_list_custom_blocks",
+      arguments: { storeId: "1234", page: 1 },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(request).toHaveBeenCalled();
+  });
+
+  it("refuses an uncredentialled call when the env fallback is off", async () => {
+    // The hazard this closes: on a shared process a leftover HERMES_ACCESS_TOKEN
+    // would silently serve that merchant's data to a request that brought none,
+    // and the reply would look exactly like a successful one.
+    const request = vi.fn();
+    const client = await buildServerAndClient(
+      baseCtx({
+        config: loadConfig({ HERMES_ACCESS_TOKEN: "env-token", HERMES_STORE_ID: "env-store" }),
+        allowEnvFallback: false,
+        createClient: () => ({ request }),
+      })
+    );
+
+    const result = await client.callTool({ name: "hermes_get_widget", arguments: { id: "w1" } });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("MISSING_CREDENTIALS");
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("prefers the HTTP credential over anything the call carries in _meta", async () => {
+    // A bearer token on the request is the caller's real identity. `_meta` is
+    // in-band and must never be able to talk over it.
+    const seen: unknown[] = [];
+    const request = vi.fn(async () => ({ ok: true }));
+    const client = await buildServerAndClient(
+      baseCtx({
+        httpCredentials: { accessToken: "http-token", storeId: "http-store" },
+        allowEnvFallback: false,
+        createClient: (user) => {
+          seen.push({ ...user });
+          return { request };
+        },
+      })
+    );
+
+    await client.callTool({
+      _meta: { [ACCESS_TOKEN_KEY]: "meta-token", [STORE_ID_KEY]: "meta-store" },
+      name: "hermes_get_active_theme",
+      arguments: {},
+    });
+
+    expect(seen).toEqual([{ accessToken: "http-token", storeId: "http-store" }]);
+  });
+});

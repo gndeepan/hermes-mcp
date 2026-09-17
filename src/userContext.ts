@@ -71,25 +71,58 @@ const hasMeta = (meta: Record<string, unknown> | undefined, key: string, bare: s
   meta !== undefined && (key in meta || bare in meta);
 
 /**
+ * Credentials taken from the HTTP request that carried this call.
+ *
+ * Populated by the HTTP entry from the `Authorization` bearer token and the
+ * `X-Store-Id` header, which is how a standard MCP client authenticates. Kept
+ * as a plain shape rather than the SDK's `AuthInfo` so this module stays
+ * transport-free and unit-testable.
+ */
+export interface HttpCredentials {
+  accessToken: string;
+  storeId: string;
+  requestId?: string;
+}
+
+/**
  * Builds the identity for one tool call.
  *
- * `_meta` wins over the environment: the env credential is a single-user
- * fallback for local runs and CI, whereas `_meta` is what a real client sends
- * per request. Having neither is a caller error, not a server fault — it is
- * surfaced as `MISSING_CREDENTIALS` naming the keys to send, and nothing
- * reaches Hermes.
+ * Three sources, in order of how specific they are to *this* request:
  *
- * The token and the store id are resolved as one unit, never field by field.
- * A call that names either one is asserting an identity of its own, so a
- * half-filled `_meta` is refused outright rather than completed from the
- * environment — otherwise a caller who sent only a token would act with their
- * own credential against the *environment's* store, which is both a wrong
- * answer and a cross-tenant one.
+ * 1. **HTTP** — the bearer token on the request that carried the call. This is
+ *    how a standard MCP client authenticates, so it wins.
+ * 2. **`_meta`** — the in-band credential a Superfans client attaches to the
+ *    call itself. Retained because it is what the stdio transport has; there is
+ *    no HTTP request under stdio to take a header from.
+ * 3. **The environment** — a single-user fallback for local runs and CI. The
+ *    HTTP entry passes `null` here, because in a shared process a request that
+ *    forgot its credentials must fail rather than silently act as whatever
+ *    merchant happens to be in the environment.
+ *
+ * Having none of the three is a caller error, not a server fault — surfaced as
+ * `MISSING_CREDENTIALS` naming the keys to send, and nothing reaches Hermes.
+ *
+ * The token and the store id are resolved as one unit, never field by field. A
+ * source that names either one is asserting an identity of its own, so a
+ * half-filled source is refused outright rather than completed from the next
+ * one down — otherwise a caller who sent only a token would act with their own
+ * credential against someone else's store, which is both a wrong answer and a
+ * cross-tenant one.
  */
 export const userContextFrom = (
   meta: Record<string, unknown> | undefined,
+  http: HttpCredentials | undefined,
   fallback: { accessToken: string; storeId: string } | null
 ): UserContext => {
+  if (http !== undefined) {
+    if (!http.accessToken || !http.storeId) throw new MissingCredentialsError();
+    return {
+      accessToken: http.accessToken,
+      storeId: http.storeId,
+      ...(http.requestId ? { requestId: http.requestId } : {}),
+    };
+  }
+
   const callAsserts =
     hasMeta(meta, ACCESS_TOKEN_KEY, "accessToken") || hasMeta(meta, STORE_ID_KEY, "storeId");
 

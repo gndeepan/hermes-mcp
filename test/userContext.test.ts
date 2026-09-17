@@ -14,13 +14,14 @@ describe("userContextFrom", () => {
   it("reads the namespaced keys a client is expected to send", () => {
     const user = userContextFrom(
       { [ACCESS_TOKEN_KEY]: "t", [STORE_ID_KEY]: "s", [REQUEST_ID_KEY]: "r" },
+      undefined,
       null
     );
     expect(user).toEqual({ accessToken: "t", storeId: "s", requestId: "r" });
   });
 
   it("accepts the bare key names a human types by hand", () => {
-    expect(userContextFrom({ accessToken: "t", storeId: "s" }, null)).toEqual({
+    expect(userContextFrom({ accessToken: "t", storeId: "s" }, undefined, null)).toEqual({
       accessToken: "t",
       storeId: "s",
     });
@@ -29,13 +30,14 @@ describe("userContextFrom", () => {
   it("prefers the namespaced key when both spellings are present", () => {
     const user = userContextFrom(
       { [ACCESS_TOKEN_KEY]: "namespaced", accessToken: "bare", [STORE_ID_KEY]: "s" },
+      undefined,
       null
     );
     expect(user.accessToken).toBe("namespaced");
   });
 
   it("omits requestId entirely when the call carries none", () => {
-    expect(userContextFrom({ [ACCESS_TOKEN_KEY]: "t", [STORE_ID_KEY]: "s" }, null)).not.toHaveProperty(
+    expect(userContextFrom({ [ACCESS_TOKEN_KEY]: "t", [STORE_ID_KEY]: "s" }, undefined, null)).not.toHaveProperty(
       "requestId"
     );
   });
@@ -43,24 +45,24 @@ describe("userContextFrom", () => {
   it("accepts a store id sent as a JSON number, as the MCP Inspector sends it", () => {
     // `--tool-metadata storeId=1234` JSON-parses to a number. Refusing it
     // would report a well-formed identity as "no credentials".
-    expect(userContextFrom({ [ACCESS_TOKEN_KEY]: "t", [STORE_ID_KEY]: 1234 }, null)).toEqual({
+    expect(userContextFrom({ [ACCESS_TOKEN_KEY]: "t", [STORE_ID_KEY]: 1234 }, undefined, null)).toEqual({
       accessToken: "t",
       storeId: "1234",
     });
   });
 
   it("lets the call's own credentials win over the env fallback", () => {
-    const user = userContextFrom({ [ACCESS_TOKEN_KEY]: "t", [STORE_ID_KEY]: "s" }, envFallback);
+    const user = userContextFrom({ [ACCESS_TOKEN_KEY]: "t", [STORE_ID_KEY]: "s" }, undefined, envFallback);
     expect(user).toEqual({ accessToken: "t", storeId: "s" });
   });
 
   it("uses the env fallback only when the call carries nothing", () => {
-    expect(userContextFrom(undefined, envFallback)).toEqual(envFallback);
-    expect(userContextFrom({}, envFallback)).toEqual(envFallback);
+    expect(userContextFrom(undefined, undefined, envFallback)).toEqual(envFallback);
+    expect(userContextFrom({}, undefined, envFallback)).toEqual(envFallback);
   });
 
   it("throws MissingCredentialsError when neither source has credentials", () => {
-    expect(() => userContextFrom(undefined, null)).toThrow(MissingCredentialsError);
+    expect(() => userContextFrom(undefined, undefined, null)).toThrow(MissingCredentialsError);
   });
 
   it.each([
@@ -74,12 +76,12 @@ describe("userContextFrom", () => {
   ])("refuses a half-built identity: %s", (_label, meta) => {
     // A partial credential must fail closed rather than silently fall through
     // to the env fallback and act as the wrong user.
-    expect(() => userContextFrom(meta, envFallback)).toThrow(MissingCredentialsError);
+    expect(() => userContextFrom(meta, undefined, envFallback)).toThrow(MissingCredentialsError);
   });
 
   it("names both required _meta keys in the error, so the caller can fix the call", () => {
-    expect(() => userContextFrom(undefined, null)).toThrow(ACCESS_TOKEN_KEY);
-    expect(() => userContextFrom(undefined, null)).toThrow(STORE_ID_KEY);
+    expect(() => userContextFrom(undefined, undefined, null)).toThrow(ACCESS_TOKEN_KEY);
+    expect(() => userContextFrom(undefined, undefined, null)).toThrow(STORE_ID_KEY);
   });
 });
 

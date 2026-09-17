@@ -7,15 +7,37 @@ import type { SchemaRegistry } from "../registry/schemaRegistry.js";
 import type { CompiledEndpoint } from "../registry/schemaFromOpenApi.js";
 import { ENDPOINTS } from "../registry/endpoints.js";
 import type { HermesRequester } from "../hermesClient.js";
-import { userContextFrom, type UserContext } from "../userContext.js";
+import { userContextFrom, type HttpCredentials, type UserContext } from "../userContext.js";
 import { fetchOpenApiDoc } from "../openapiSync.js";
-import { InvalidPathParameterError, toToolResult, type ToolResult } from "../errors.js";
+import {
+  InvalidPathParameterError,
+  StoreMismatchError,
+  toToolResult,
+  type ToolResult,
+} from "../errors.js";
 
 export interface ToolContext {
   config: HermesMcpConfig;
   logger: Logger;
   registry: SchemaRegistry;
   createClient: (user: UserContext) => HermesRequester;
+  /**
+   * Credentials from the HTTP request being served, when there is one.
+   *
+   * Set by the HTTP entry, which builds a fresh server per request. Absent
+   * under stdio, where there is no request to take a header from.
+   */
+  httpCredentials?: HttpCredentials;
+  /**
+   * Whether a call with no credentials of its own may fall back to the
+   * environment.
+   *
+   * True for stdio, where one process serves one user by construction. False
+   * for the shared HTTP service, where falling back would mean a request that
+   * forgot its credentials silently acts as whatever merchant is in the
+   * environment — a cross-tenant read that looks exactly like success.
+   */
+  allowEnvFallback?: boolean;
 }
 
 /**
@@ -109,6 +131,27 @@ export const buildRequest = (
 type ToolReturn = ToolResult | { content: [{ type: "text"; text: string }] };
 
 /**
+ * A call may only act on the store it authenticated as.
+ *
+ * Four tools take `storeId` as an argument that steers the path, while the
+ * authenticated identity comes from the token. Nothing made the two agree.
+ * Hermes would probably refuse the mismatch, but a tenant boundary cannot rest
+ * on "probably" — and the cost of being wrong on a shared process is one
+ * merchant reading another's blocks.
+ *
+ * Tools without a `storeId` argument are unaffected: the header alone decides
+ * what they see.
+ */
+const assertActingOnOwnStore = (args: Record<string, unknown>, user: UserContext): void => {
+  const named = args.storeId;
+  if (named === undefined || named === null) return;
+
+  const asText = typeof named === "number" ? String(named) : named;
+  if (typeof asText !== "string" || asText === "") return;
+  if (asText !== user.storeId) throw new StoreMismatchError(asText, user.storeId);
+};
+
+/**
  * The single seam where every cross-cutting concern lives: resolving the
  * caller's identity from this call's `_meta`, tracing, timing, and failure
  * mapping. `HermesClient` stays a pure transport precisely so all of this can
@@ -127,7 +170,12 @@ const wrap =
     try {
       const compiled = ctx.registry.get(toolName);
       const { path, query, body } = buildRequest(compiled, args);
-      const user = userContextFrom(call?.mcpReq?._meta, ctx.config.credentials);
+      const user = userContextFrom(
+        call?.mcpReq?._meta,
+        ctx.httpCredentials,
+        ctx.allowEnvFallback === false ? null : ctx.config.credentials
+      );
+      assertActingOnOwnStore(args, user);
 
       ctx.logger.debug("tool call start", {
         tool: toolName,

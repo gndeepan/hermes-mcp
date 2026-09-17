@@ -49,13 +49,40 @@ export class MissingCredentialsError extends Error {
     super(
       [
         "This tool call carried no Hermes credentials.",
-        "Send the end user's own credentials in this request's `_meta`:",
+        "Over HTTP, send the end user's own token as `Authorization: Bearer <token>`",
+        "with their store in the `X-Store-Id` header (and optionally `X-Request-ID`).",
+        "Over stdio, send the same values in this request's `_meta`:",
         '"com.superfans.hermes/accessToken" and "com.superfans.hermes/storeId"',
-        '(optionally "com.superfans.hermes/requestId" for tracing).',
-        "For a single-user local run, set HERMES_ACCESS_TOKEN and HERMES_STORE_ID instead.",
+        '(optionally "com.superfans.hermes/requestId").',
+        "HERMES_ACCESS_TOKEN and HERMES_STORE_ID are a single-user local fallback and are",
+        "ignored by the shared HTTP service, where acting as the environment would mean",
+        "acting as the wrong merchant.",
       ].join(" ")
     );
     this.name = "MissingCredentialsError";
+  }
+}
+
+/**
+ * A call that names one store as an argument while authenticating as another.
+ *
+ * `storeId` arrives twice on the store-scoped tools: once as a tool argument
+ * that steers the path, and once as the authenticated identity behind the
+ * token. Nothing made them agree. Hermes would very likely refuse the
+ * mismatch, but "very likely" is not a tenant boundary — and on a shared
+ * multi-user process the cost of being wrong is one merchant reading another's
+ * blocks. Refused here, before the wire.
+ */
+export class StoreMismatchError extends Error {
+  constructor(
+    readonly argumentStoreId: string,
+    readonly authenticatedStoreId: string
+  ) {
+    super(
+      `Refusing the call: it names storeId "${argumentStoreId}" but authenticates as ` +
+        `"${authenticatedStoreId}". A call may only act on the store it is authenticated for.`
+    );
+    this.name = "StoreMismatchError";
   }
 }
 
@@ -95,6 +122,7 @@ const KNOWN_ERROR_CODES: [new (...args: never[]) => Error, string][] = [
   [HermesRejectedError, "REJECTED"],
   [HermesUnavailableError, "UNAVAILABLE"],
   [MissingCredentialsError, "MISSING_CREDENTIALS"],
+  [StoreMismatchError, "STORE_MISMATCH"],
   [InvalidPathParameterError, "INVALID_PATH_PARAM"],
 ];
 
