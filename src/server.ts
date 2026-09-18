@@ -80,11 +80,18 @@ export const buildServer = (
 };
 
 /**
- * A long-lived single-user server, as stdio serves it.
+ * A long-lived server, as stdio serves it.
  *
  * Owns the refresh loop, which a per-request server must not: the loop exists
  * to push a refreshed schema into a server that would otherwise keep
  * advertising the one it started with.
+ *
+ * No longer single-user. The ai-agent runs one of these as a child process and
+ * serves every merchant through it, putting the caller's identity on each
+ * call's `_meta`. So the environment fallback is off unless
+ * `HERMES_SINGLE_USER=1` says this really is one person's process — left on in
+ * a shared process, a call that lost its credentials would act as whatever
+ * merchant is configured rather than failing.
  */
 export const createServer = (
   config: HermesMcpConfig = loadConfig(),
@@ -94,7 +101,7 @@ export const createServer = (
 
   // Order matters: the tools must be registered before the refresh loop starts,
   // so the loop has a sync function to push refreshed schemas through.
-  const { server, syncToolSchemas } = buildServer(runtime);
+  const { server, syncToolSchemas } = buildServer(runtime, { allowEnvFallback: config.singleUser });
 
   startOpenApiRefreshLoop(runtime.registry, config, logger, () => {
     const changed = syncToolSchemas();

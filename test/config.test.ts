@@ -33,3 +33,44 @@ describe("loadConfig", () => {
     expect(config.credentials).toEqual({ accessToken: "t", storeId: "s" });
   });
 });
+
+/**
+ * The environment fallback is opt-in, and the default is the safety property.
+ *
+ * stdio used to mean one process per merchant, so acting as the configured
+ * identity when a call carried no `_meta` was harmless. The ai-agent now runs
+ * one child and serves everyone through it. In a shared process that fallback
+ * turns a call that lost its credentials into a read as whatever merchant
+ * happens to be in the environment — which succeeds, returns real data, and
+ * belongs to the wrong person.
+ */
+describe("the single-user fallback", () => {
+  it("is off unless asked for, even when credentials are configured", () => {
+    const config = loadConfig({
+      HERMES_ACCESS_TOKEN: "tok",
+      HERMES_STORE_ID: "str_a",
+    } as NodeJS.ProcessEnv);
+
+    expect(config.credentials).toEqual({ accessToken: "tok", storeId: "str_a" });
+    expect(config.singleUser).toBe(false);
+  });
+
+  it("is on when HERMES_SINGLE_USER is exactly 1", () => {
+    const config = loadConfig({
+      HERMES_ACCESS_TOKEN: "tok",
+      HERMES_STORE_ID: "str_a",
+      HERMES_SINGLE_USER: "1",
+    } as NodeJS.ProcessEnv);
+
+    expect(config.singleUser).toBe(true);
+  });
+
+  it("is not turned on by a truthy-looking value", () => {
+    // "true", "yes" and "0" are all things someone writes meaning something.
+    // Only the documented value counts, because the failure mode of guessing
+    // wrong here is cross-tenant.
+    for (const value of ["true", "yes", "0", "", "TRUE"]) {
+      expect(loadConfig({ HERMES_SINGLE_USER: value } as NodeJS.ProcessEnv).singleUser).toBe(false);
+    }
+  });
+});

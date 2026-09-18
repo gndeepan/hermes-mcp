@@ -16,6 +16,21 @@ export interface HermesMcpConfig {
    * own per-request credentials, which always win over this.
    */
   credentials: { accessToken: string; storeId: string } | null;
+  /**
+   * Whether this process serves exactly one merchant.
+   *
+   * Off by default, and that default is the safety property. The stdio entry
+   * used to be one process per merchant, so falling back to `credentials` when
+   * a call carried no `_meta` was harmless. It is now shared — the ai-agent
+   * runs one child and puts the caller's identity on each call — and in a
+   * shared process that fallback means a call that lost its credentials
+   * silently acts as whatever merchant is in the environment. Which is a
+   * cross-tenant read that looks exactly like success.
+   *
+   * Set `HERMES_SINGLE_USER=1` for a local run or CI, where acting as the one
+   * configured merchant is the whole point.
+   */
+  singleUser: boolean;
 }
 
 export const loadConfig = (env: NodeJS.ProcessEnv = process.env): HermesMcpConfig => {
@@ -49,5 +64,6 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): HermesMcpConfi
     openApiRefreshIntervalS,
     openApiFetchTimeoutMs: 10_000,
     credentials: accessToken && storeId ? { accessToken, storeId } : null,
+    singleUser: env.HERMES_SINGLE_USER === "1",
   };
 };
