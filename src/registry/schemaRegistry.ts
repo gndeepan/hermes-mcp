@@ -39,17 +39,30 @@ export class SchemaRegistry {
    * single entry's failure is logged and that entry keeps its last-known-good
    * schema; the rest still refresh — a removed or changed operation degrades
    * one tool, not the whole server.
+   *
+   * Returns the tools that could not be compiled, which is not the same as
+   * the tools that changed. A tool whose operation has gone from the document
+   * keeps working, keeps being advertised, and keeps validating calls against
+   * a schema for an endpoint that may no longer exist — so the next call fails
+   * at Hermes, with a 404 that says nothing about why. Until now the only
+   * trace was a log line on a server nobody is watching. Handing the names
+   * back lets the caller say so out loud.
    */
-  refresh(doc: OpenApiDocument, logger: Logger): void {
+  refresh(doc: OpenApiDocument, logger: Logger): string[] {
+    const stale: string[] = [];
+
     for (const entry of ENDPOINTS) {
       try {
         this.compiled.set(entry.toolName, compileEndpoint(doc, entry));
       } catch (err) {
+        stale.push(entry.toolName);
         logger.error("openapi schema refresh failed for tool, keeping last-known-good", {
           tool: entry.toolName,
           error: errorMessage(err),
         });
       }
     }
+
+    return stale;
   }
 }

@@ -229,16 +229,17 @@ const registerRefreshTool = (
     REFRESH_TOOL,
     {
       description:
-        "Recompile every other hermes_* tool's input schema from Hermes's live OpenAPI document, without waiting for the background refresh interval. Takes no arguments and touches no store data — it only re-reads the API specification, so it is safe to call at any time. Returns how many tool schemas were recompiled and the names of the ones that actually changed; any change is also re-advertised to you immediately, so re-read the tool list afterwards. Reach for this when a hermes_* call is rejected for an argument you believe is correct, which can mean Hermes has changed that endpoint since this server started. It cannot add or remove tools — only the allowlisted operations exist, whatever the specification says.",
+        "Recompile every other hermes_* tool's input schema from Hermes's live OpenAPI document, without waiting for the background refresh interval. Takes no arguments and touches no store data — it only re-reads the API specification, so it is safe to call at any time. Returns how many tool schemas were recompiled, the names of the ones that actually changed, and `stale`: tools whose operation is no longer in the specification and which are therefore still advertising the last schema that compiled. Any change is re-advertised to you immediately, so re-read the tool list afterwards. A tool listed in `stale` may fail at Hermes however correctly you call it. Reach for this when a hermes_* call is rejected for an argument you believe is correct, which can mean Hermes has changed that endpoint since this server started. It cannot add or remove tools — only the allowlisted operations exist, whatever the specification says.",
       inputSchema: z.object({}),
     },
     (async (): Promise<ToolReturn> => {
       const traceId = randomBytes(4).toString("hex");
       let changed: string[];
+      let stale: string[];
       let refreshed: number;
       try {
         const doc = await fetchOpenApiDoc(ctx.config.openApiDocsUrl, ctx.config.openApiFetchTimeoutMs);
-        ctx.registry.refresh(doc, ctx.logger);
+        stale = ctx.registry.refresh(doc, ctx.logger);
         changed = syncToolSchemas();
         refreshed = ctx.registry.list().length;
       } catch (err) {
@@ -248,8 +249,9 @@ const registerRefreshTool = (
         traceId,
         refreshed,
         changed: changed.length,
+        stale: stale.length,
       });
-      return { content: [{ type: "text", text: JSON.stringify({ refreshed, changed }) }] };
+      return { content: [{ type: "text", text: JSON.stringify({ refreshed, changed, stale }) }] };
     }) as Parameters<typeof server.registerTool>[2]
   );
 };

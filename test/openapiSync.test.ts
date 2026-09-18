@@ -39,7 +39,7 @@ describe("startOpenApiRefreshLoop", () => {
       { openApiDocsUrl: "https://hermes.test/v3/api-docs", openApiFetchTimeoutMs: 1000, openApiRefreshIntervalS: 900 },
       logger
     );
-    await vi.waitFor(() => expect(infoSpy).toHaveBeenCalledWith("openapi schema refresh ok"));
+    await vi.waitFor(() => expect(infoSpy).toHaveBeenCalledWith("openapi schema refresh ok", { stale: 0 }));
     stop();
   });
 

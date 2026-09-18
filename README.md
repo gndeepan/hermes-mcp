@@ -130,6 +130,11 @@ Adding a twelfth Hermes operation is one entry in `src/registry/endpoints.ts`;
 `test/registry/schemaRegistry.test.ts` fails loudly if it doesn't compile
 against the checked-in snapshot.
 
+A refresh picks up a **modified** operation automatically, deliberately ignores
+an **added** one, and reports a **removed** one as `stale` while keeping the
+tool working on its last schema. [docs/openapi-refresh.md](docs/openapi-refresh.md)
+sets out each case and why they differ.
+
 ## Inspecting the server
 
 [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is wired up

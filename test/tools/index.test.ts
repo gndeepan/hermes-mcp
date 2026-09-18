@@ -586,3 +586,145 @@ describe("serving more than one merchant", () => {
     expect(seen).toEqual([{ accessToken: "http-token", storeId: "http-store" }]);
   });
 });
+
+/**
+ * What a refresh does when the API definition actually changes.
+ *
+ * The three cases are not symmetric and the asymmetry is the design, not an
+ * oversight: a *modified* operation flows through automatically, an *added*
+ * one deliberately does not, and a *removed* one degrades rather than
+ * disappearing. Written down as tests because "does refreshing pick up API
+ * changes?" has a different answer for each, and the answer to two of them is
+ * no.
+ */
+describe("when Hermes changes its API", () => {
+  const docServing = (mutate: (doc: ReturnType<typeof loadSnapshotDoc>) => void) =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const doc = loadSnapshotDoc();
+        mutate(doc);
+        return new Response(JSON.stringify(doc), { status: 200 });
+      })
+    );
+
+  const refresh = async (): Promise<{ refreshed: number; changed: string[]; stale: string[] }> => {
+    const client = await buildServerAndClient(baseCtx());
+    const result = await client.callTool({ name: "hermes_refresh_openapi", arguments: {} });
+    expect(result.isError).toBeFalsy();
+    return JSON.parse(textOf(result)) as { refreshed: number; changed: string[]; stale: string[] };
+  };
+
+  describe("an operation is modified", () => {
+    it("recompiles that tool's schema and says which one moved", async () => {
+      docServing((doc) => {
+        doc.paths["/api/v1/widgets/{id}"].get!.parameters = [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "locale", in: "query", required: false, schema: { type: "string" } },
+        ];
+      });
+
+      const { changed, stale } = await refresh();
+
+      expect(changed).toEqual(["hermes_get_widget"]);
+      expect(stale).toEqual([]);
+    });
+
+    it("leaves every other tool alone", async () => {
+      docServing((doc) => {
+        doc.paths["/api/v1/widgets/{id}"].get!.parameters = [];
+      });
+
+      const { changed } = await refresh();
+
+      expect(changed).not.toContain("hermes_get_active_theme");
+      expect(changed).not.toContain("hermes_create_custom_block");
+    });
+  });
+
+  describe("an operation is added", () => {
+    it("does not become a tool, because the allowlist is the authority boundary", async () => {
+      // The obvious expectation is that a new endpoint shows up as a new tool.
+      // It must not. ENDPOINTS is what this server will ever call; if a path
+      // appearing in a document Hermes serves could grant this server reach,
+      // then whoever can edit that document decides what an agent may do to a
+      // merchant's store. Adding a tool stays a reviewed code change.
+      docServing((doc) => {
+        doc.paths["/api/v1/discounts"] = {
+          get: { operationId: "listDiscounts", parameters: [], responses: {} },
+        } as never;
+      });
+
+      const { refreshed, changed } = await refresh();
+
+      expect(refreshed).toBe(ENDPOINTS.length);
+      expect(changed).toEqual([]);
+    });
+
+    it("still advertises exactly the allowlisted tools afterwards", async () => {
+      docServing((doc) => {
+        doc.paths["/api/v1/discounts"] = {
+          get: { operationId: "listDiscounts", parameters: [], responses: {} },
+        } as never;
+      });
+      const client = await buildServerAndClient(baseCtx());
+      await client.callTool({ name: "hermes_refresh_openapi", arguments: {} });
+
+      const { tools } = await client.listTools();
+      const names = tools.map((tool) => tool.name);
+
+      expect(names).toHaveLength(ENDPOINTS.length + 1); // + hermes_refresh_openapi
+      expect(names).not.toContain("hermes_list_discounts");
+    });
+  });
+
+  describe("an operation is removed", () => {
+    it("names the tool as stale rather than failing the whole refresh", async () => {
+      docServing((doc) => {
+        delete doc.paths["/api/v1/widgets/{id}"];
+      });
+
+      const { refreshed, stale } = await refresh();
+
+      // Both tools on that path, because a path carries every verb: the GET
+      // and the PUT go stale together. The rest still refreshed — one path
+      // disappearing from a document, which also happens when a fetch returns
+      // a truncated or wrong-environment spec, must not take the server down.
+      expect(refreshed).toBe(ENDPOINTS.length);
+      expect(stale.sort()).toEqual(["hermes_get_widget", "hermes_update_widget"]);
+    });
+
+    it("keeps the tool callable on its last-known-good schema", async () => {
+      // Deliberate. A removal we cannot distinguish from a bad fetch should
+      // degrade, not delete: dropping the tool would break a working agent on
+      // the strength of one unreliable document. `stale` is how someone finds
+      // out it is living on borrowed time.
+      const request = vi.fn(async () => ({ id: "w1" }));
+      const ctx = baseCtx({ createClient: () => ({ request }) });
+      const { client } = await buildWithSync(ctx);
+
+      ctx.registry.refresh({ paths: {} }, ctx.logger);
+
+      const result = await client.callTool({
+        _meta: CREDENTIAL_META,
+        name: "hermes_get_widget",
+        arguments: { id: "w1" },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(request).toHaveBeenCalledWith("get", "/api/v1/widgets/w1", {
+        query: {},
+        body: undefined,
+      });
+    });
+
+    it("reports every tool as stale when the document is empty", async () => {
+      docServing((doc) => {
+        doc.paths = {};
+      });
+
+      const { stale } = await refresh();
+      expect(stale).toHaveLength(ENDPOINTS.length);
+    });
+  });
+});

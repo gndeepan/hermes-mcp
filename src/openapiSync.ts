@@ -44,9 +44,14 @@ export const startOpenApiRefreshLoop = (
   const refreshOnce = (): void => {
     fetchOpenApiDoc(config.openApiDocsUrl, config.openApiFetchTimeoutMs)
       .then((doc) => {
-        registry.refresh(doc, logger);
+        const stale = registry.refresh(doc, logger);
         onRefreshed?.();
-        logger.info("openapi schema refresh ok");
+        // `stale` at the info level as well as the per-tool error above: an
+        // operator watching this loop sees "refresh ok" every interval, and
+        // "ok" for a server quietly advertising a tool Hermes no longer has is
+        // the wrong word. The count makes the difference visible without
+        // having to grep for the errors.
+        logger.info("openapi schema refresh ok", { stale: stale.length });
       })
       .catch((err) => {
         logger.warn("openapi schema refresh failed, keeping last-known-good schemas", {
