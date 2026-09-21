@@ -5,15 +5,73 @@ tools. It holds **no identity of its own**: every tool call carries the end
 user's own Hermes credentials, supplied by the client on that call.
 
 Design docs:
-[base design](docs/superpowers/specs/2026-09-08-hermes-mcp-design.md) ·
-[auth, tracing & refresh](docs/superpowers/specs/2026-09-08-hermes-mcp-auth-design.md)
+[base design](https://bitbucket.org/vajro/hermes-mcp/src/main/docs/superpowers/specs/2026-09-08-hermes-mcp-design.md) ·
+[auth, tracing & refresh](https://bitbucket.org/vajro/hermes-mcp/src/main/docs/superpowers/specs/2026-09-08-hermes-mcp-auth-design.md)
 
-## Quick start
+(Absolute links: the published tarball ships only `dist/` and this README, so
+relative paths into `docs/` resolve on Bitbucket but not from an install.)
+
+## Install
+
+Published to the private Vajro registry as `@superfans/hermes-mcp`. Point the
+`@superfans` scope at that registry and authenticate once:
+
+```ini
+# ~/.npmrc
+@superfans:registry=https://npm.apkg.io/vajro/
+//npm.apkg.io/vajro/:_authToken=${SUPERFANS_NPM_TOKEN}
+```
+
+Scope the registry line to `@superfans:` rather than setting a bare
+`registry=`. A bare one routes *every* package — `zod`, `esbuild`, all of them
+— through the private registry, which answers `E401` for anything it does not
+host.
+
+`_authToken` takes the token verbatim. The older `_password` form is different:
+npm expects that one **base64-encoded**, and a raw token pasted there fails with
+`E401` on every request, including `publish`.
+
+### Run it with `npx`
+
+No install step, no clone, no build — `npx` fetches the package and runs the
+server straight over stdio:
+
+```bash
+npx -y @superfans/hermes-mcp
+```
+
+The package ships two executables:
+
+| Command | Entry | Transport |
+|---|---|---|
+| `hermes-mcp` | `dist/server.js` | stdio — one client, the usual MCP case |
+| `hermes-mcp-http` | `dist/httpServer.js` | HTTP on `PORT` (default `8787`) — the shared multi-merchant service |
+
+```bash
+npx -y @superfans/hermes-mcp              # stdio
+PORT=9000 npx -y -p @superfans/hermes-mcp hermes-mcp-http   # HTTP
+```
+
+Run on its own with no credentials, the server starts and speaks MCP but
+answers every tool call with `MISSING_CREDENTIALS` — that is the designed
+behaviour, not a misconfiguration. See [Authentication](#authentication).
+
+Install it globally instead if you'd rather not refetch each run:
+
+```bash
+npm install -g @superfans/hermes-mcp
+hermes-mcp
+```
+
+## From source
+
+For developing the server itself:
 
 ```bash
 npm install
-npm run build     # esbuild -> dist/server.js
+npm run build     # esbuild -> dist/server.js, dist/httpServer.js
 npm start         # node dist/server.js -- speaks MCP over stdio
+npm run start:http
 ```
 
 ## Authentication
@@ -106,6 +164,23 @@ For a local run or a CI script, `HERMES_ACCESS_TOKEN` and `HERMES_STORE_ID` act
 as a fallback identity, used **only** when a call carries no credentials of its
 own. Credentials on the call always win.
 
+The fallback is **off unless you set `HERMES_SINGLE_USER=1`**, and that default
+is the safety property, not an inconvenience. This process is shared — the
+ai-agent runs one child and puts each caller's identity on the call — and in a
+shared process a silent env fallback means a call that lost its credentials
+acts as whatever merchant happens to be in the environment. That is a
+cross-tenant read that looks exactly like success. Opting in says *this process
+serves one merchant and that is the point*.
+
+So set all three together for a local run, or none of them for a server:
+
+```bash
+HERMES_ACCESS_TOKEN=… HERMES_STORE_ID=… HERMES_SINGLE_USER=1 npx -y @superfans/hermes-mcp
+```
+
+Set the token and store id but not `HERMES_SINGLE_USER` and the server starts
+normally and refuses every uncredentialed call with `MISSING_CREDENTIALS`.
+
 ## Configuration
 
 | Variable | Default | Notes |
@@ -117,16 +192,49 @@ own. Credentials on the call always win.
 | `HERMES_ACCESS_TOKEN` | — | Single-user fallback only; see above. Set with `HERMES_STORE_ID` or neither. |
 | `HERMES_STORE_ID` | — | See above |
 | `HERMES_REFRESH_TOKEN` | — | Optional. Lets a long local run or CI job survive an expiry. Needs the two above alongside it. |
+| `HERMES_SINGLE_USER` | unset | `1` turns the three above on. Without it they are ignored — see [Single-user fallback](#single-user-fallback). |
+| `PORT` | `8787` | `hermes-mcp-http` only. Ignored by the stdio entry. |
 
 ## Register with Claude Code
 
-`dist/` is a build artifact and is not committed — run `npm run build` once
-before registering, and again after any change under `src/`.
+From the published package — nothing to clone or build:
 
 ```bash
 claude mcp add hermes-mcp --scope user -e HERMES_MCP_LOG_LEVEL=info \
-  -e HERMES_ACCESS_TOKEN=… -e HERMES_STORE_ID=… \
+  -e HERMES_ACCESS_TOKEN=… -e HERMES_STORE_ID=… -e HERMES_SINGLE_USER=1 \
+  -- npx -y @superfans/hermes-mcp
+```
+
+Or from a working copy, when you are changing the server. `dist/` is a build
+artifact and is not committed — run `npm run build` once before registering,
+and again after any change under `src/`:
+
+```bash
+claude mcp add hermes-mcp --scope user -e HERMES_MCP_LOG_LEVEL=info \
+  -e HERMES_ACCESS_TOKEN=… -e HERMES_STORE_ID=… -e HERMES_SINGLE_USER=1 \
   -- node "/absolute/path/to/hermes-mcp/dist/server.js"
+```
+
+Either form needs `HERMES_SINGLE_USER=1` alongside the token and store id.
+Without it the fallback identity is ignored and every call is refused — see
+[Single-user fallback](#single-user-fallback).
+
+The equivalent JSON, for a client configured by file rather than by CLI:
+
+```jsonc
+{
+  "mcpServers": {
+    "hermes-mcp": {
+      "command": "npx",
+      "args": ["-y", "@superfans/hermes-mcp"],
+      "env": {
+        "HERMES_ACCESS_TOKEN": "…",
+        "HERMES_STORE_ID": "…",
+        "HERMES_SINGLE_USER": "1"
+      }
+    }
+  }
+}
 ```
 
 Claude Code does not attach Hermes credentials to `_meta`, so an interactive
@@ -167,7 +275,8 @@ against the checked-in snapshot.
 
 A refresh picks up a **modified** operation automatically, deliberately ignores
 an **added** one, and reports a **removed** one as `stale` while keeping the
-tool working on its last schema. [docs/openapi-refresh.md](docs/openapi-refresh.md)
+tool working on its last schema.
+[docs/openapi-refresh.md](https://bitbucket.org/vajro/hermes-mcp/src/main/docs/openapi-refresh.md)
 sets out each case and why they differ.
 
 ## Inspecting the server
@@ -273,6 +382,55 @@ level.
 npm test
 npm run test:watch
 ```
+
+## Publishing
+
+```bash
+npm run build && npm test && npm run typecheck
+npm version <patch|minor|major>
+npm publish            # registry comes from publishConfig
+npm publish --dry-run  # inspect the tarball first
+```
+
+`publishConfig.registry` pins the target, so publishing does not depend on
+whatever `registry=` happens to be set locally. `files` restricts the tarball
+to `dist/`, the OpenAPI snapshot and this README — five files. `.env` and
+`.npmrc` are both gitignored and excluded; check a dry run before every release
+anyway:
+
+```bash
+npm publish --dry-run 2>&1 | grep -E '\.npmrc|\.env'   # must print nothing
+```
+
+Two things that fail quietly and are worth knowing:
+
+- **Write `bin` paths without a `./` prefix.** npm 11 silently drops
+  `"./dist/server.js"` — `npm publish` warns `"bin[hermes-mcp]" script name
+  dist/server.js was invalid and removed` and publishes with *no* executable,
+  so `npx @superfans/hermes-mcp` fails for everyone. `"dist/server.js"` is
+  kept. `npm pack` does not warn about this; only `npm publish` does.
+- **`dist/` is gitignored but still published**, because `files` names it
+  explicitly and that takes precedence. It is a build artifact, so build before
+  publishing — nothing in the repo will remind you.
+- **`openapi/hermes-api-docs.json` is a runtime dependency, not a dev asset.**
+  `src/registry/snapshot.ts` reads it at startup to compile the tool schemas,
+  so it must stay in `files`. Drop it and the published server still launches
+  but dies on `ENOENT` before serving a tool — over stdio that surfaces only as
+  a generic `Internal server error`, which is easy to misread as a
+  configuration problem.
+
+Verify a release actually works end to end, from a directory that is not this
+one:
+
+```bash
+npx -y @superfans/hermes-mcp <<< '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}'
+```
+
+A healthy release prints a `server ready` log with `"tools":12`, then a
+successful `initialize` result. Anything else is a failure worth reading
+closely: no output at all means the `bin` did not resolve, and an
+`Internal server error` in place of the result usually means a file the server
+reads at startup was left out of `files`.
 
 ## Hard constraints
 

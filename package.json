@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "files": [
     "dist",
+    "openapi/hermes-api-docs.json",
     "README.md"
   ],
   "type": "module",
@@ -10,7 +11,8 @@
     "registry": "https://npm.apkg.io/vajro/"
   },
   "bin": {
-    "hermes-mcp": "./dist/server.js"
+    "hermes-mcp": "dist/server.js",
+    "hermes-mcp-http": "dist/httpServer.js"
   },
   "engines": {
     "node": ">=20"
