@@ -1,5 +1,5 @@
 {
-  "name": "hermes-mcp",
+  "name": "@superfans/hermes-mcp",
   "version": "0.1.0",
   "files": [
     "dist",

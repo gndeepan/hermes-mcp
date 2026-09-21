@@ -14,57 +14,44 @@ but not from an install.)
 
 ## Install
 
-Published as **`hermes-mcp`** to the Vajro workspace's
+Published as **`@superfans/hermes-mcp`** to the Vajro workspace's
 [Bitbucket Packages](https://npm.apkg.io/vajro/) registry.
 
-Authenticate once. Add **only** these two lines to `~/.npmrc` — no `registry=`
-line:
+Authenticate once, in `~/.npmrc`:
 
 ```ini
 # ~/.npmrc
+@superfans:registry=https://npm.apkg.io/vajro/
 //npm.apkg.io/vajro/:username=<your-atlassian-email>
 //npm.apkg.io/vajro/:_password=<api-token, base64-encoded>
 ```
 
-The token must be base64-encoded; npm expects `_password` that way and rejects
-a raw one with `E401` on every request:
+Two details in there are worth getting right, because each fails in a way that
+points somewhere else:
+
+- **Map the `@superfans` scope, never a bare `registry=`.** A bare one sends
+  *every* package to Bitbucket Packages, which hosts only Vajro's own and does
+  not proxy npmjs — so this server's dependencies 404 and the install dies
+  before it runs: `404 Not Found - GET https://npm.apkg.io/vajro/@modelcontextprotocol%2fserver`.
+  Scoped, only `@superfans/*` goes to Bitbucket and everything else resolves
+  from npmjs as usual.
+- **Base64-encode the API token.** npm expects `_password` encoded, and a raw
+  token there fails `E401` on every request, `publish` included — including
+  `npm whoami`, confusingly, *succeeding* anyway.
+
+  ```bash
+  echo -n '<atlassian-api-token>' | base64 -w 0
+  ```
+
+### Run it with `npx`
+
+No install step, no clone, no build:
 
 ```bash
-echo -n '<atlassian-api-token>' | base64 -w 0
+npx -y @superfans/hermes-mcp
 ```
 
-Then install by **tarball URL**, which is the part that is easy to get wrong:
-
-```bash
-# one-off run, nothing installed
-npx -y https://npm.apkg.io/vajro/hermes-mcp/-/hermes-mcp-0.1.0.tgz
-
-# or add it to a project
-npm install https://npm.apkg.io/vajro/hermes-mcp/-/hermes-mcp-0.1.0.tgz
-```
-
-### Why the tarball URL, and not `npx hermes-mcp`
-
-Because this registry hosts only Vajro's own packages — it does not proxy
-npmjs. Reaching `hermes-mcp` by name needs a bare `registry=` line, and that
-one line redirects *every* package to Bitbucket Packages, including this
-server's own dependencies (`@modelcontextprotocol/server`, `zod`). They are not
-there, so the install dies on `E404` before it ever runs:
-
-```
-npm error 404 Not Found - GET https://npm.apkg.io/vajro/@modelcontextprotocol%2fserver
-```
-
-npm can map a *scope* to a registry and leave everything else on npmjs, but
-`hermes-mcp` is unscoped, so there is no scope to map. A tarball URL sidesteps
-the whole problem: the package is fetched directly from Bitbucket (the
-`//npm.apkg.io/vajro/:` lines still authenticate it) while the default registry
-stays npmjs and the dependencies resolve normally.
-
-The URL pins a version. Bump it by hand on upgrade, or publish under a scope —
-see [Publishing](#publishing).
-
-### The two executables
+The package ships two executables:
 
 | Command | Entry | Transport |
 |---|---|---|
@@ -74,21 +61,19 @@ see [Publishing](#publishing).
 `npx` runs the stdio one by default; `-p` picks the other:
 
 ```bash
-TARBALL=https://npm.apkg.io/vajro/hermes-mcp/-/hermes-mcp-0.1.0.tgz
-
-npx -y "$TARBALL"                                  # stdio
-PORT=9000 npx -y -p "$TARBALL" hermes-mcp-http     # HTTP
+npx -y @superfans/hermes-mcp                                  # stdio
+PORT=9000 npx -y -p @superfans/hermes-mcp hermes-mcp-http     # HTTP
 ```
 
 Run with no credentials, the server starts and speaks MCP but answers every
 tool call with `MISSING_CREDENTIALS`. That is the designed behaviour, not a
 misconfiguration — see [Authentication](#authentication).
 
-Install it globally if you'd rather not refetch each run:
+Add it to a project, or install it globally to avoid refetching each run:
 
 ```bash
-npm install -g https://npm.apkg.io/vajro/hermes-mcp/-/hermes-mcp-0.1.0.tgz
-hermes-mcp
+npm install @superfans/hermes-mcp
+npm install -g @superfans/hermes-mcp && hermes-mcp
 ```
 
 ## From source
@@ -204,7 +189,7 @@ So set all three together for a local run, or none of them for a server:
 
 ```bash
 HERMES_ACCESS_TOKEN=… HERMES_STORE_ID=… HERMES_SINGLE_USER=1 \
-  npx -y https://npm.apkg.io/vajro/hermes-mcp/-/hermes-mcp-0.1.0.tgz
+  npx -y @superfans/hermes-mcp
 ```
 
 Set the token and store id but not `HERMES_SINGLE_USER` and the server starts
@@ -231,7 +216,7 @@ From the published package — nothing to clone or build:
 ```bash
 claude mcp add hermes-mcp --scope user -e HERMES_MCP_LOG_LEVEL=info \
   -e HERMES_ACCESS_TOKEN=… -e HERMES_STORE_ID=… -e HERMES_SINGLE_USER=1 \
-  -- npx -y https://npm.apkg.io/vajro/hermes-mcp/-/hermes-mcp-0.1.0.tgz
+  -- npx -y @superfans/hermes-mcp
 ```
 
 Or from a working copy, when you are changing the server. `dist/` is a build
@@ -255,7 +240,7 @@ The equivalent JSON, for a client configured by file rather than by CLI:
   "mcpServers": {
     "hermes-mcp": {
       "command": "npx",
-      "args": ["-y", "https://npm.apkg.io/vajro/hermes-mcp/-/hermes-mcp-0.1.0.tgz"],
+      "args": ["-y", "@superfans/hermes-mcp"],
       "env": {
         "HERMES_ACCESS_TOKEN": "…",
         "HERMES_STORE_ID": "…",
@@ -421,8 +406,9 @@ npm publish            # registry comes from publishConfig
 npm publish --dry-run  # inspect the tarball first
 ```
 
-`publishConfig.registry` pins the target, so publishing does not depend on
-whatever `registry=` happens to be set locally. `files` restricts the tarball
+`publishConfig.registry` pins which registry the tarball is `PUT` to, so that
+much does not depend on local config — though the `@superfans` scope mapping in
+`.npmrc` still has to be right, as below. `files` restricts the tarball
 to `dist/`, the OpenAPI snapshot and this README — five files. `.env` and
 `.npmrc` are both gitignored and excluded; check a dry run before every release
 anyway:
@@ -448,21 +434,24 @@ Two things that fail quietly and are worth knowing:
   a generic `Internal server error`, which is easy to misread as a
   configuration problem.
 
-### The package name
-
-`hermes-mcp` is unscoped because Bitbucket Packages refused the scoped form:
-publishing `@superfans/hermes-mcp` fails with
+### If `publish` returns 404
 
 ```
 npm error 404 Not Found - PUT https://npm.apkg.io/vajro/@superfans%2fhermes-mcp
 ```
 
-even with working credentials — `npm whoami` answers correctly and a read of a
-non-existent package returns `404` rather than `401`. Unscoped publishes fine.
-A scope matching the workspace (`@vajro/hermes-mcp`) is the obvious next thing
-to try and has **not** been tested; if it works it is worth moving to, because
-a scope can be mapped to this registry in `.npmrc` and would let consumers
-install by name instead of by [tarball URL](#why-the-tarball-url-and-not-npx-hermes-mcp).
+The message reads as though the name is wrong; in practice it has meant the
+`.npmrc` is. Check these two before renaming anything — both were observed to
+produce a `404` on the `PUT` while `publish` was aimed at the correct URL by
+`publishConfig`:
+
+- **The `@superfans` scope is not mapped to this registry.** Adding
+  `@superfans:registry=https://npm.apkg.io/vajro/` was what made the scoped
+  publish go through; with only a bare `registry=` line the same credentials
+  got a `404`, even though the unscoped `hermes-mcp` published fine.
+- **The token is not base64-encoded.** A raw one under `_password` fails every
+  read and write. `npm whoami` is no test of this — it answers correctly
+  regardless.
 
 ### Verifying a release
 
@@ -470,7 +459,7 @@ From a directory that is not this one, so the local `.npmrc` and `node_modules`
 cannot mask a packaging fault:
 
 ```bash
-npx -y https://npm.apkg.io/vajro/hermes-mcp/-/hermes-mcp-<version>.tgz <<< '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}'
+npx -y @superfans/hermes-mcp <<< '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}'
 ```
 
 A healthy release prints a `server ready` log with `"tools":12`, then a
