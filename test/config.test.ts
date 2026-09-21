@@ -32,6 +32,19 @@ describe("loadConfig", () => {
     const config = loadConfig({ HERMES_ACCESS_TOKEN: "t", HERMES_STORE_ID: "s" });
     expect(config.credentials).toEqual({ accessToken: "t", storeId: "s" });
   });
+
+  it("carries an optional refresh token, so a long local run survives an expiry", () => {
+    const config = loadConfig({
+      HERMES_ACCESS_TOKEN: "t",
+      HERMES_STORE_ID: "s",
+      HERMES_REFRESH_TOKEN: "r",
+    });
+    expect(config.credentials).toEqual({ accessToken: "t", storeId: "s", refreshToken: "r" });
+  });
+
+  it("refuses a refresh token with no session for it to renew", () => {
+    expect(() => loadConfig({ HERMES_REFRESH_TOKEN: "r" })).toThrow(/HERMES_REFRESH_TOKEN/);
+  });
 });
 
 /**

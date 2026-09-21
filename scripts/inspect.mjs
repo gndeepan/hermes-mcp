@@ -23,6 +23,7 @@ const CONFIG = "inspector.json";
 
 const ACCESS_TOKEN_KEY = "com.superfans.hermes/accessToken";
 const STORE_ID_KEY = "com.superfans.hermes/storeId";
+const REFRESH_TOKEN_KEY = "com.superfans.hermes/refreshToken";
 
 /** Server settings worth forwarding from `.env`, beyond the credentials themselves. */
 const FORWARDED_ENV = [
@@ -49,6 +50,9 @@ if (existsSync(".env")) {
 
 const accessToken = process.env.HERMES_ACCESS_TOKEN ?? "";
 const storeId = process.env.HERMES_STORE_ID ?? "";
+// Optional. With it, an inspect session that outlives its access token renews
+// it instead of dying at UNAUTHENTICATED halfway through.
+const refreshToken = process.env.HERMES_REFRESH_TOKEN ?? "";
 const haveCreds = wantsCreds && accessToken !== "" && storeId !== "";
 
 const args = [LAUNCHER, mode, "--config", CONFIG];
@@ -66,6 +70,7 @@ if (haveCreds && mode !== "--cli") {
   // The single-user fallback: one identity for the whole session, which is all
   // the web UI and TUI can express.
   args.push("-e", `HERMES_ACCESS_TOKEN=${accessToken}`, "-e", `HERMES_STORE_ID=${storeId}`);
+  if (refreshToken !== "") args.push("-e", `HERMES_REFRESH_TOKEN=${refreshToken}`);
 }
 
 const callsATool = forwarded.includes("tools/call");
@@ -77,6 +82,7 @@ if (haveCreds && mode === "--cli" && callsATool && !alreadyHasMetadata) {
   // Appended last: `--tool-metadata` is variadic, so anything after it would be
   // swallowed as another key=value pair.
   args.push("--tool-metadata", `${ACCESS_TOKEN_KEY}=${accessToken}`, `${STORE_ID_KEY}=${storeId}`);
+  if (refreshToken !== "") args.push(`${REFRESH_TOKEN_KEY}=${refreshToken}`);
 }
 
 // Never the token itself — only whether one was found, and for which store.

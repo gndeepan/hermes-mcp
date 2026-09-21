@@ -1,8 +1,14 @@
 {
   "name": "@superfans/hermes-mcp",
   "version": "0.1.0",
-  "private": true,
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "type": "module",
+  "publishConfig": {
+    "registry": "https://npm.apkg.io/vajro/"
+  },
   "bin": {
     "hermes-mcp": "./dist/server.js"
   },

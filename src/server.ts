@@ -9,6 +9,7 @@ import { loadSnapshotDoc } from "./registry/snapshot.js";
 import { ENDPOINTS } from "./registry/endpoints.js";
 import { startOpenApiRefreshLoop } from "./openapiSync.js";
 import { HermesClient } from "./hermesClient.js";
+import { TokenCache } from "./tokenRefresh.js";
 import type { HttpCredentials } from "./userContext.js";
 
 /**
@@ -23,6 +24,16 @@ export interface ServerRuntime {
   config: HermesMcpConfig;
   logger: Logger;
   registry: SchemaRegistry;
+  /**
+   * Renewed access tokens, shared by every call this process serves.
+   *
+   * Process-scoped for the same reason the registry is: per request, it would
+   * be a cache that never hits, and every stale call would pay for its own
+   * renewal. Sharing it is safe because entries are keyed by the SHA-256 of a
+   * refresh token — the key is the secret, so only a caller already holding
+   * that session can reach its entry. See `tokenRefresh.ts`.
+   */
+  tokens: TokenCache;
 }
 
 export const createRuntime = (
@@ -32,6 +43,7 @@ export const createRuntime = (
   config,
   logger,
   registry: SchemaRegistry.fromDocument(loadSnapshotDoc()),
+  tokens: new TokenCache(config.hermesBaseUrl),
 });
 
 /** What differs between one served unit and the next. */
@@ -62,7 +74,7 @@ export const buildServer = (
   runtime: ServerRuntime,
   options: ServerOptions = {}
 ): { server: McpServer; syncToolSchemas: () => string[] } => {
-  const { config, logger, registry } = runtime;
+  const { config, logger, registry, tokens } = runtime;
   const server = new McpServer({ name: config.serverName, version: config.serverVersion });
 
   const syncToolSchemas = registerHermesTools(server, {
@@ -70,6 +82,7 @@ export const buildServer = (
     logger,
     registry,
     createClient: (user) => new HermesClient(config.hermesBaseUrl, user),
+    tokens,
     ...(options.httpCredentials === undefined
       ? {}
       : { httpCredentials: options.httpCredentials }),

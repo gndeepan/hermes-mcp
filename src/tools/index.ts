@@ -9,7 +9,9 @@ import { ENDPOINTS } from "../registry/endpoints.js";
 import type { HermesRequester } from "../hermesClient.js";
 import { userContextFrom, type HttpCredentials, type UserContext } from "../userContext.js";
 import { fetchOpenApiDoc } from "../openapiSync.js";
+import { isStale, type SessionTokens, type TokenCache } from "../tokenRefresh.js";
 import {
+  HermesUnauthenticatedError,
   InvalidPathParameterError,
   StoreMismatchError,
   toToolResult,
@@ -38,6 +40,15 @@ export interface ToolContext {
    * environment — a cross-tenant read that looks exactly like success.
    */
   allowEnvFallback?: boolean;
+  /**
+   * The process-wide store of renewed access tokens.
+   *
+   * Absent means renewal is off entirely and a rejected token is reported as a
+   * rejected token — the behaviour this server had before renewal existed. A
+   * call is renewed only if this is present *and* that call granted a refresh
+   * token, so it takes both a configured server and a consenting caller.
+   */
+  tokens?: TokenCache;
 }
 
 /**
@@ -151,16 +162,87 @@ const assertActingOnOwnStore = (args: Record<string, unknown>, user: UserContext
   if (asText !== user.storeId) throw new StoreMismatchError(asText, user.storeId);
 };
 
+/** How a renewal came to happen, for the log line. Never the tokens themselves. */
+type RenewalReason = "expired" | "rejected";
+
+/**
+ * Runs one Hermes request, renewing the session around it when — and only
+ * when — the caller granted a refresh token.
+ *
+ * This server still owns no credential of its own. What changed is that a
+ * caller may now lend it one: a refresh token in `_meta` is explicit
+ * permission to renew *that* session, and nothing else. A call without one
+ * behaves exactly as this server always did, with a 401 surfaced unchanged.
+ *
+ * Two triggers, because one of them is not enough:
+ *
+ * - **Expiry**, from the caller's own `expiresAt`, so a known-dead token never
+ *   costs a failed round trip in the first place.
+ * - **Rejection**, because `expiresAt` is a claim and Hermes's 401 is a fact.
+ *   Clocks drift, sessions get revoked, and a caller may not send an expiry at
+ *   all.
+ *
+ * The retry happens exactly once. A second 401 is Hermes's answer about a
+ * freshly minted token, and asking a third time only makes the merchant wait.
+ * Retrying a non-idempotent call is safe here in a way a transport retry is
+ * not: a 401 means Hermes refused the request before acting on it, so there is
+ * no half-done write to duplicate.
+ */
+const sendWithRenewal = async (
+  ctx: ToolContext,
+  user: UserContext,
+  send: (acting: UserContext) => Promise<unknown>,
+  onRenewal: (reason: RenewalReason) => void
+): Promise<unknown> => {
+  const cache = ctx.tokens;
+  const refreshToken = user.refreshToken;
+  if (cache === undefined || refreshToken === undefined) return send(user);
+
+  let acting = user;
+  if (user.expiresAt !== undefined && isStale({ ...user, refreshToken, expiresAt: user.expiresAt })) {
+    acting = withTokens(user, await cache.accessTokenFor(refreshToken));
+    onRenewal("expired");
+  }
+
+  try {
+    return await send(acting);
+  } catch (err) {
+    if (!(err instanceof HermesUnauthenticatedError)) throw err;
+
+    // Forced: the cached token is precisely the one Hermes just refused, so
+    // handing it back would retry the same rejected request.
+    const renewed = await cache.accessTokenFor(refreshToken, { force: true });
+    // An identical token means the renewal changed nothing. Sending it again
+    // asks Hermes the same question and gets the same answer.
+    if (renewed.accessToken === acting.accessToken) throw err;
+
+    onRenewal("rejected");
+    return send(withTokens(user, renewed));
+  }
+};
+
+/**
+ * The same identity, carrying a renewed credential.
+ *
+ * `storeId` and `requestId` are copied from the original on purpose. Renewal
+ * replaces a credential; it never changes who the call acts as or what it may
+ * touch. Hermes's refresh response names a `userId` and a list of stores, and
+ * letting either of those reach the request would let an auth response widen a
+ * call's scope after `assertActingOnOwnStore` has already ruled on it.
+ */
+const withTokens = (user: UserContext, tokens: SessionTokens): UserContext => ({
+  ...user,
+  accessToken: tokens.accessToken,
+  refreshToken: tokens.refreshToken,
+  expiresAt: tokens.expiresAt,
+});
+
 /**
  * The single seam where every cross-cutting concern lives: resolving the
- * caller's identity from this call's `_meta`, tracing, timing, and failure
- * mapping. `HermesClient` stays a pure transport precisely so all of this can
- * live here, once.
- *
- * There is no refresh-and-retry: this server owns no credential and cannot
- * mint a new one, so a 401 is the caller's own session being rejected and is
- * surfaced to them unchanged — the same contract the AI Server's `HermesClient`
- * keeps.
+ * caller's identity from this call's `_meta`, session renewal, tracing, timing,
+ * and failure mapping. `HermesClient` stays a pure transport precisely so all
+ * of this can live here, once — renewal in particular has no business in a
+ * class documented as holding no credential lifecycle.
  */
 const wrap =
   (toolName: string, method: string, ctx: ToolContext) =>
@@ -186,7 +268,16 @@ const wrap =
         storeId: user.storeId,
       });
 
-      const data = await ctx.createClient(user).request(method, path, { query, body });
+      const data = await sendWithRenewal(
+        ctx,
+        user,
+        (acting) => ctx.createClient(acting).request(method, path, { query, body }),
+        (reason) => {
+          // The reason, never the credential. `logging.ts` redacts token-shaped
+          // keys, but the surest way not to log a secret is not to pass one.
+          ctx.logger.info("renewed hermes session", { tool: toolName, traceId, reason });
+        }
+      );
 
       ctx.logger.info("tool call ok", { tool: toolName, traceId, durationMs: Date.now() - start });
       return { content: [{ type: "text", text: JSON.stringify(data) }] };

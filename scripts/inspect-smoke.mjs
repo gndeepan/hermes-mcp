@@ -52,10 +52,14 @@ const runInspector = (args) => {
   // The server process inherits this environment through the Inspector, so a
   // developer with HERMES_ACCESS_TOKEN exported in their shell would silently
   // satisfy the single-user fallback and break the "no _meta is refused" check.
-  // Scrubbing both makes the run identical on a laptop and in CI.
+  // Scrubbing all three makes the run identical on a laptop and in CI.
+  // HERMES_REFRESH_TOKEN has to go with them: the server refuses to start with
+  // a refresh token and no session to renew, so leaving it behind would fail
+  // the smoke run for a reason that has nothing to do with what it checks.
   const env = { ...process.env };
   delete env.HERMES_ACCESS_TOKEN;
   delete env.HERMES_STORE_ID;
+  delete env.HERMES_REFRESH_TOKEN;
 
   const result = spawnSync(
     process.execPath,

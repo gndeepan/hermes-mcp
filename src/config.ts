@@ -1,3 +1,5 @@
+import type { EnvCredentials } from "./userContext.js";
+
 export type LogLevel = "silent" | "error" | "warn" | "info" | "debug";
 
 const LOG_LEVELS: readonly LogLevel[] = ["silent", "error", "warn", "info", "debug"];
@@ -15,7 +17,7 @@ export interface HermesMcpConfig {
    * tool call carries no credentials in its `_meta`. A real client sends its
    * own per-request credentials, which always win over this.
    */
-  credentials: { accessToken: string; storeId: string } | null;
+  credentials: EnvCredentials | null;
   /**
    * Whether this process serves exactly one merchant.
    *
@@ -55,6 +57,14 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): HermesMcpConfi
     throw new Error("HERMES_ACCESS_TOKEN and HERMES_STORE_ID must be set together, or neither.");
   }
 
+  // Optional, unlike the pair above. Without it a local run still works, it
+  // just dies at the first expiry the way it always did; with it, a long CI
+  // run or a day at a terminal survives one.
+  const refreshToken = env.HERMES_REFRESH_TOKEN;
+  if (refreshToken && !accessToken) {
+    throw new Error("HERMES_REFRESH_TOKEN needs HERMES_ACCESS_TOKEN and HERMES_STORE_ID alongside it.");
+  }
+
   return {
     logLevel: (rawLogLevel as LogLevel | undefined) ?? "info",
     serverName: "hermes-mcp",
@@ -63,7 +73,10 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): HermesMcpConfi
     openApiDocsUrl: env.HERMES_OPENAPI_DOCS_URL ?? "https://hermes-atlas.vjr-dev.com/v3/api-docs",
     openApiRefreshIntervalS,
     openApiFetchTimeoutMs: 10_000,
-    credentials: accessToken && storeId ? { accessToken, storeId } : null,
+    credentials:
+      accessToken && storeId
+        ? { accessToken, storeId, ...(refreshToken ? { refreshToken } : {}) }
+        : null,
     singleUser: env.HERMES_SINGLE_USER === "1",
   };
 };

@@ -1,4 +1,5 @@
 import { MissingCredentialsError } from "./errors.js";
+import { toEpochMillis } from "./tokenRefresh.js";
 
 /**
  * The credential namespace this server reads out of a tool call's `_meta`.
@@ -12,6 +13,18 @@ export const META_NAMESPACE = "com.superfans.hermes/";
 export const ACCESS_TOKEN_KEY = `${META_NAMESPACE}accessToken`;
 export const STORE_ID_KEY = `${META_NAMESPACE}storeId`;
 export const REQUEST_ID_KEY = `${META_NAMESPACE}requestId`;
+
+/**
+ * The renewal credentials, both optional.
+ *
+ * A caller that sends neither gets exactly the behaviour this server had
+ * before they existed: a rejected token is reported as a rejected token. A
+ * caller that sends a refresh token is granting this server permission to
+ * renew its session on its behalf, and `expiresAt` lets that happen *before* a
+ * call fails rather than after.
+ */
+export const REFRESH_TOKEN_KEY = `${META_NAMESPACE}refreshToken`;
+export const EXPIRES_AT_KEY = `${META_NAMESPACE}expiresAt`;
 
 /**
  * Who a single tool call acts as.
@@ -28,6 +41,13 @@ export interface UserContext {
   storeId: string;
   /** Propagated as `X-Request-ID` so one trace can be followed caller -> MCP -> Hermes. */
   requestId?: string;
+  /**
+   * Permission to renew this session, and the means to do it. Absent unless
+   * the caller chose to grant it.
+   */
+  refreshToken?: string;
+  /** When `accessToken` dies, in epoch milliseconds. Only meaningful with a refresh token. */
+  expiresAt?: number;
 }
 
 /** The Hermes headers a user context turns into. The only place they are spelled out. */
@@ -71,6 +91,35 @@ const hasMeta = (meta: Record<string, unknown> | undefined, key: string, bare: s
   meta !== undefined && (key in meta || bare in meta);
 
 /**
+ * The single-user environment identity, which may now also carry a refresh
+ * token so a long local run does not die at the first expiry.
+ */
+export interface EnvCredentials {
+  accessToken: string;
+  storeId: string;
+  refreshToken?: string;
+}
+
+/**
+ * The renewal half of an identity, as the fields to spread onto it.
+ *
+ * `expiresAt` without a refresh token is dropped rather than kept: nothing can
+ * act on knowing a token is about to die if there is no way to renew it, and
+ * carrying it would only invite a later reader to treat "expired" as a
+ * decision point when the only honest answer is still to send the token and
+ * let Hermes rule on it.
+ */
+const renewalFrom = (
+  refreshToken: string | undefined,
+  expiresAt: unknown
+): { refreshToken?: string; expiresAt?: number } => {
+  const token = (refreshToken ?? "").trim();
+  if (token === "") return {};
+  const millis = toEpochMillis(expiresAt);
+  return { refreshToken: token, ...(millis === undefined ? {} : { expiresAt: millis }) };
+};
+
+/**
  * Credentials taken from the HTTP request that carried this call.
  *
  * Populated by the HTTP entry from the `Authorization` bearer token and the
@@ -82,6 +131,9 @@ export interface HttpCredentials {
   accessToken: string;
   storeId: string;
   requestId?: string;
+  refreshToken?: string;
+  /** Epoch milliseconds, already normalized by whoever read the header. */
+  expiresAt?: number;
 }
 
 /**
@@ -112,7 +164,7 @@ export interface HttpCredentials {
 export const userContextFrom = (
   meta: Record<string, unknown> | undefined,
   http: HttpCredentials | undefined,
-  fallback: { accessToken: string; storeId: string } | null
+  fallback: EnvCredentials | null
 ): UserContext => {
   if (http !== undefined) {
     if (!http.accessToken || !http.storeId) throw new MissingCredentialsError();
@@ -120,6 +172,7 @@ export const userContextFrom = (
       accessToken: http.accessToken,
       storeId: http.storeId,
       ...(http.requestId ? { requestId: http.requestId } : {}),
+      ...renewalFrom(http.refreshToken, http.expiresAt),
     };
   }
 
@@ -133,5 +186,12 @@ export const userContextFrom = (
   if (!accessToken || !storeId) throw new MissingCredentialsError();
 
   const requestId = readMeta(meta, REQUEST_ID_KEY, "requestId");
-  return { accessToken, storeId, ...(requestId ? { requestId } : {}) };
+  // From the same source as the access token, never mixed. The env's refresh
+  // token belongs to the env's session; using it to renew a session the call
+  // asserted for itself would hand this call a different user's credential.
+  const renewal = callAsserts
+    ? renewalFrom(readMeta(meta, REFRESH_TOKEN_KEY, "refreshToken"), readMeta(meta, EXPIRES_AT_KEY, "expiresAt"))
+    : renewalFrom(fallback?.refreshToken, undefined);
+
+  return { accessToken, storeId, ...(requestId ? { requestId } : {}), ...renewal };
 };

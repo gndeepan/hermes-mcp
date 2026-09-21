@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { MissingCredentialsError } from "../src/errors.js";
 import {
   ACCESS_TOKEN_KEY,
+  EXPIRES_AT_KEY,
+  REFRESH_TOKEN_KEY,
   REQUEST_ID_KEY,
   STORE_ID_KEY,
   headersFor,
@@ -82,6 +84,99 @@ describe("userContextFrom", () => {
   it("names both required _meta keys in the error, so the caller can fix the call", () => {
     expect(() => userContextFrom(undefined, undefined, null)).toThrow(ACCESS_TOKEN_KEY);
     expect(() => userContextFrom(undefined, undefined, null)).toThrow(STORE_ID_KEY);
+  });
+});
+
+describe("userContextFrom, renewal credentials", () => {
+  it("reads the refresh token and expiry a client sends alongside the access token", () => {
+    expect(
+      userContextFrom(
+        {
+          [ACCESS_TOKEN_KEY]: "t",
+          [STORE_ID_KEY]: "s",
+          [REFRESH_TOKEN_KEY]: "r",
+          [EXPIRES_AT_KEY]: 1_790_001_288_734,
+        },
+        undefined,
+        null
+      )
+    ).toEqual({ accessToken: "t", storeId: "s", refreshToken: "r", expiresAt: 1_790_001_288_734 });
+  });
+
+  it("accepts the bare key names too", () => {
+    const user = userContextFrom(
+      { accessToken: "t", storeId: "s", refreshToken: "r", expiresAt: "1790001288734" },
+      undefined,
+      null
+    );
+    expect(user.refreshToken).toBe("r");
+    expect(user.expiresAt).toBe(1_790_001_288_734);
+  });
+
+  it("normalizes an expiry sent in seconds to milliseconds", () => {
+    // Read as milliseconds, a seconds value is always long past, so every
+    // single call would renew — slow, and silently so.
+    const user = userContextFrom(
+      { accessToken: "t", storeId: "s", refreshToken: "r", expiresAt: 1_790_001_288 },
+      undefined,
+      null
+    );
+    expect(user.expiresAt).toBe(1_790_001_288_000);
+  });
+
+  it("stays exactly as it was when the call sends no renewal credentials", () => {
+    const user = userContextFrom({ accessToken: "t", storeId: "s" }, undefined, null);
+    expect(user).not.toHaveProperty("refreshToken");
+    expect(user).not.toHaveProperty("expiresAt");
+  });
+
+  it("keeps a refresh token without an expiry, for renewal on rejection alone", () => {
+    const user = userContextFrom({ accessToken: "t", storeId: "s", refreshToken: "r" }, undefined, null);
+    expect(user.refreshToken).toBe("r");
+    expect(user).not.toHaveProperty("expiresAt");
+  });
+
+  it("ignores an expiry with no refresh token, since nothing could act on it", () => {
+    const user = userContextFrom(
+      { accessToken: "t", storeId: "s", expiresAt: 1_790_001_288_734 },
+      undefined,
+      null
+    );
+    expect(user).not.toHaveProperty("expiresAt");
+  });
+
+  it("takes renewal credentials from the same source as the access token, never mixed", () => {
+    // The call asserts its own identity, so the env's refresh token belongs to
+    // a different session and must not be used to renew this one.
+    const user = userContextFrom({ accessToken: "t", storeId: "s" }, undefined, {
+      ...envFallback,
+      refreshToken: "env-refresh",
+    });
+    expect(user).not.toHaveProperty("refreshToken");
+  });
+
+  it("uses the env refresh token when the env also supplied the access token", () => {
+    const user = userContextFrom(undefined, undefined, { ...envFallback, refreshToken: "env-refresh" });
+    expect(user.refreshToken).toBe("env-refresh");
+  });
+
+  it("reads renewal credentials from the HTTP request that carried the call", () => {
+    const user = userContextFrom(undefined, {
+      accessToken: "t",
+      storeId: "s",
+      refreshToken: "r",
+      expiresAt: 1_790_001_288_734,
+    }, null);
+    expect(user.refreshToken).toBe("r");
+    expect(user.expiresAt).toBe(1_790_001_288_734);
+  });
+
+  it("never renders the refresh token as a header", () => {
+    // It authenticates only the renewal endpoint's body. On a Hermes request
+    // it is a live session secret with nothing to do there.
+    expect(
+      headersFor({ accessToken: "t", storeId: "s", refreshToken: "r", expiresAt: 1 })
+    ).toEqual({ Authorization: "Bearer t", "X-Store-Id": "s", Accept: "application/json" });
   });
 });
 

@@ -64,6 +64,27 @@ export class MissingCredentialsError extends Error {
 }
 
 /**
+ * The session is over, and no credential this server can reach will revive it.
+ *
+ * Distinct from `HermesUnauthenticatedError` on purpose, and the distinction is
+ * the only reason renewal is worth having a separate error for. A plain 401
+ * says "that token was not accepted", which a renewal may well fix and which
+ * the caller can do nothing about. This says the renewal was tried and Hermes
+ * refused the refresh token too — so there is exactly one remedy, the merchant
+ * signs in again, and the caller can act on that rather than retrying.
+ */
+export class SessionExpiredError extends Error {
+  constructor(readonly detail: string) {
+    super(
+      "The Hermes session has expired and could not be renewed" +
+        `${detail === "" ? "" : `: ${detail}`}. The refresh token is no longer accepted, ` +
+        "so the merchant must sign in again to get a new one."
+    );
+    this.name = "SessionExpiredError";
+  }
+}
+
+/**
  * A call that names one store as an argument while authenticating as another.
  *
  * `storeId` arrives twice on the store-scoped tools: once as a tool argument
@@ -122,6 +143,7 @@ const KNOWN_ERROR_CODES: [new (...args: never[]) => Error, string][] = [
   [HermesRejectedError, "REJECTED"],
   [HermesUnavailableError, "UNAVAILABLE"],
   [MissingCredentialsError, "MISSING_CREDENTIALS"],
+  [SessionExpiredError, "SESSION_EXPIRED"],
   [StoreMismatchError, "STORE_MISMATCH"],
   [InvalidPathParameterError, "INVALID_PATH_PARAM"],
 ];

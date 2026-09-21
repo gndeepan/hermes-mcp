@@ -22,11 +22,20 @@ import { createLogger } from "./logging.js";
 import { ENDPOINTS } from "./registry/endpoints.js";
 import { startOpenApiRefreshLoop } from "./openapiSync.js";
 import { buildServer, createRuntime, type ServerRuntime } from "./server.js";
+import { toEpochMillis } from "./tokenRefresh.js";
 import type { HttpCredentials } from "./userContext.js";
 
 /** How a merchant identifies itself to this service. */
 const STORE_HEADER = "x-store-id";
 const REQUEST_ID_HEADER = "x-request-id";
+
+/**
+ * The renewal headers, the HTTP spelling of the `_meta` keys the stdio entry
+ * reads. Both optional: a client that sends neither gets a rejected token
+ * reported as a rejected token, exactly as before they existed.
+ */
+const REFRESH_TOKEN_HEADER = "x-refresh-token";
+const EXPIRES_AT_HEADER = "x-token-expires-at";
 
 /**
  * Reads the caller's identity off the HTTP request.
@@ -46,10 +55,18 @@ export const credentialsFrom = (headers: Headers): HttpCredentials | undefined =
   const accessToken = bearer?.[1]?.trim() ?? "";
 
   if (accessToken === "" && storeId === "") return undefined;
+
+  // Renewal is granted per request, alongside the credential it renews. An
+  // expiry with no refresh token is dropped: nothing can act on it.
+  const refreshToken = (headers.get(REFRESH_TOKEN_HEADER) ?? "").trim();
+  const expiresAt = refreshToken === "" ? undefined : toEpochMillis(headers.get(EXPIRES_AT_HEADER));
+
   return {
     accessToken,
     storeId: storeId.trim(),
     ...(requestId === "" ? {} : { requestId: requestId.trim() }),
+    ...(refreshToken === "" ? {} : { refreshToken }),
+    ...(expiresAt === undefined ? {} : { expiresAt }),
   };
 };
 

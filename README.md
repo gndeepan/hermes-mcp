@@ -27,6 +27,8 @@ them straight into Hermes request headers:
 | `com.superfans.hermes/accessToken` | `Authorization: Bearer <token>` | Yes |
 | `com.superfans.hermes/storeId` | `X-Store-Id` | Yes |
 | `com.superfans.hermes/requestId` | `X-Request-ID` | No — for tracing |
+| `com.superfans.hermes/refreshToken` | none — see [Session renewal](#session-renewal) | No |
+| `com.superfans.hermes/expiresAt` | none | No |
 
 ```jsonc
 {
@@ -43,7 +45,8 @@ them straight into Hermes request headers:
 }
 ```
 
-The bare key names `accessToken`, `storeId` and `requestId` are accepted too,
+The bare key names `accessToken`, `storeId`, `requestId`, `refreshToken` and
+`expiresAt` are accepted too,
 for calls typed by hand. The namespaced form is the contract a client should
 send: MCP reserves only `io.modelcontextprotocol/*` inside `_meta`, so a
 reverse-DNS namespace cannot collide with a future spec key.
@@ -56,15 +59,46 @@ This mirrors how the AI Server talks to Hermes
   read or write what that user could already read or write;
 - no second identity system exists to keep in sync.
 
-The credential belongs to a request, never to the process: it is read per call
-and never cached, so one caller's token can never serve another's call. It
-follows that this server cannot refresh a token — it holds no refresh token and
-no session. A `401` from Hermes means *the caller's* session was rejected, and
-is surfaced to them as `[UNAUTHENTICATED]` for them to act on.
+The credential belongs to a request, never to the process: it is read per call,
+so one caller's token can never serve another's call. This server still holds
+no identity of its own — it carries the end user's.
 
 The token and store id are resolved as a unit. A call that supplies one but not
 the other is refused outright rather than completed from the environment, so a
-caller can never act with their own token against somebody else's store.
+caller can never act with their own token against somebody else's store. The
+renewal keys are resolved from that same source, never mixed with another.
+
+### Session renewal
+
+Access tokens expire. A caller that sends `refreshToken` is granting this
+server permission to renew **that** session, and nothing else. Renewal fires on
+two triggers:
+
+- **Before the call**, when `expiresAt` (epoch milliseconds; seconds are
+  normalised) is within 60 seconds of now or already past — so a known-dead
+  token never costs a failed round trip.
+- **After a `401`**, because `expiresAt` is a claim and Hermes's answer is a
+  fact: clocks drift, sessions get revoked, and a caller need not send an
+  expiry at all. The request is retried exactly **once**. Retrying is safe even
+  for a write: a `401` means Hermes refused the request before acting on it.
+
+Renewal calls `POST /api/v1/auth/refresh` with the refresh token as the whole
+body, and replaces only the credential. It never changes the store the call
+acts on — the `userId` and `stores` in the refresh response are ignored, so an
+auth response can never widen a call's scope.
+
+Renewed tokens are held in memory, keyed by the **SHA-256 of the refresh
+token**. The key is the secret: an entry is reachable only by a caller who
+already holds the session that produced it, so nothing here widens what anyone
+can reach. Raw tokens are never used as keys and never logged.
+
+**Send no `refreshToken` and behaviour is exactly as before**: a `401` from
+Hermes is surfaced as `[UNAUTHENTICATED]` for the caller to act on. When the
+refresh token is itself refused, the call fails as `[SESSION_EXPIRED]` — a
+distinct code, because it has exactly one remedy: the merchant signs in again.
+
+Over HTTP the same two values are read from the `X-Refresh-Token` and
+`X-Token-Expires-At` headers.
 
 ### Single-user fallback
 
@@ -82,6 +116,7 @@ own. Credentials on the call always win.
 | `HERMES_OPENAPI_REFRESH_INTERVAL_S` | `900` | Background schema refresh interval |
 | `HERMES_ACCESS_TOKEN` | — | Single-user fallback only; see above. Set with `HERMES_STORE_ID` or neither. |
 | `HERMES_STORE_ID` | — | See above |
+| `HERMES_REFRESH_TOKEN` | — | Optional. Lets a long local run or CI job survive an expiry. Needs the two above alongside it. |
 
 ## Register with Claude Code
 
@@ -164,9 +199,11 @@ npm run inspect
 ```
 
 To get those two values: log into the Dashboard for the store you want, and copy
-`STORE_ACCESS_TOKEN` and `STORE_ID` out of `localStorage`. The token expires, so
-re-copy it when calls start coming back `UNAUTHENTICATED` — nothing here can
-refresh it. `.env` is already in `.gitignore`; never commit a real token.
+`STORE_ACCESS_TOKEN` and `STORE_ID` out of `localStorage`. The token expires;
+copy `STORE_REFRESH_TOKEN` into `HERMES_REFRESH_TOKEN` as well and the server
+renews it for you. Without one, re-copy the access token when calls start coming
+back `UNAUTHENTICATED`. `.env` is already in `.gitignore`; never commit a real
+token.
 
 [`scripts/inspect.mjs`](scripts/inspect.mjs) then hands them to whichever client
 you asked for, by the only route that client supports:

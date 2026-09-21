@@ -9,8 +9,20 @@ import { createLogger } from "../../src/logging.js";
 import { loadConfig } from "../../src/config.js";
 import type { HermesRequester } from "../../src/hermesClient.js";
 import type { OpenApiDocument } from "../../src/registry/schemaFromOpenApi.js";
-import { HermesNotFoundError, HermesUnauthenticatedError } from "../../src/errors.js";
-import { ACCESS_TOKEN_KEY, REQUEST_ID_KEY, STORE_ID_KEY } from "../../src/userContext.js";
+import {
+  HermesForbiddenError,
+  HermesNotFoundError,
+  HermesUnauthenticatedError,
+  SessionExpiredError,
+} from "../../src/errors.js";
+import {
+  ACCESS_TOKEN_KEY,
+  EXPIRES_AT_KEY,
+  REFRESH_TOKEN_KEY,
+  REQUEST_ID_KEY,
+  STORE_ID_KEY,
+} from "../../src/userContext.js";
+import type { SessionTokens, TokenCache } from "../../src/tokenRefresh.js";
 import { buildRequest } from "../../src/tools/index.js";
 
 afterEach(() => {
@@ -214,9 +226,10 @@ describe("registerHermesTools", () => {
     expect(textOf(result)).toContain("NOT_FOUND");
   });
 
-  it("surfaces a 401 to the caller without retrying — this server cannot mint a token", async () => {
-    // The caller owns the credential's lifetime, exactly as in the AI Server:
-    // a rejected session is their answer to act on, not something to paper over.
+  it("surfaces a 401 without retrying when the caller granted no refresh token", async () => {
+    // Without a refresh token this server still cannot mint one, so a rejected
+    // session is the caller's answer to act on rather than something to paper
+    // over. See the renewal suite below for what changes when they grant one.
     const request = vi.fn(async () => {
       throw new HermesUnauthenticatedError("/api/v1/widgets/w1");
     });
@@ -726,5 +739,250 @@ describe("when Hermes changes its API", () => {
       const { stale } = await refresh();
       expect(stale).toHaveLength(ENDPOINTS.length);
     });
+  });
+});
+
+describe("session renewal", () => {
+  /** What a client sends once it is willing to have its session renewed here. */
+  const RENEWABLE_META = { ...CREDENTIAL_META, [REFRESH_TOKEN_KEY]: "r1" };
+
+  const minted = (n: number): SessionTokens => ({
+    accessToken: `fresh-${n}`,
+    refreshToken: `r${n + 1}`,
+    expiresAt: Date.now() + 3_600_000,
+  });
+
+  /**
+   * A stand-in for the real cache. Records which token it was asked for and
+   * whether the ask was forced, so these tests assert on the renewal decision
+   * rather than on HTTP traffic — `test/tokenRefresh.test.ts` owns the traffic.
+   */
+  const fakeCache = (
+    mint: (n: number) => SessionTokens = minted
+  ): { calls: { refreshToken: string; force: boolean }[]; cache: TokenCache } => {
+    let n = 0;
+    const calls: { refreshToken: string; force: boolean }[] = [];
+    const cache = {
+      accessTokenFor: async (refreshToken: string, options: { force?: boolean } = {}) => {
+        calls.push({ refreshToken, force: options.force === true });
+        return mint((n += 1));
+      },
+    } as unknown as TokenCache;
+    return { calls, cache };
+  };
+
+  /** A client factory that records which access token each attempt carried. */
+  const tokensSeen = (): { seen: string[]; createClient: ToolContext["createClient"] } => {
+    const seen: string[] = [];
+    return {
+      seen,
+      createClient: (user) => {
+        seen.push(user.accessToken);
+        return { request: async () => ({ ok: true }) };
+      },
+    };
+  };
+
+  const callWidget = (client: Client, meta: Record<string, unknown>) =>
+    client.callTool({ _meta: meta, name: "hermes_get_widget", arguments: { id: "w1" } });
+
+  it("renews before the call when the token is already past its expiry", async () => {
+    const { cache, calls } = fakeCache();
+    const { seen, createClient } = tokensSeen();
+    const client = await buildServerAndClient(baseCtx({ createClient, tokens: cache }));
+
+    await callWidget(client, { ...RENEWABLE_META, [EXPIRES_AT_KEY]: Date.now() - 1_000 });
+
+    expect(calls).toEqual([{ refreshToken: "r1", force: false }]);
+    expect(seen).toEqual(["fresh-1"]);
+  });
+
+  it("renews before the call when expiry is inside the clock skew but not yet past", async () => {
+    // A token with four seconds left cannot survive the round trip, and the
+    // clock here is not the clock at Hermes.
+    const { cache, calls } = fakeCache();
+    const { seen, createClient } = tokensSeen();
+    const client = await buildServerAndClient(baseCtx({ createClient, tokens: cache }));
+
+    await callWidget(client, { ...RENEWABLE_META, [EXPIRES_AT_KEY]: Date.now() + 4_000 });
+
+    expect(calls).toHaveLength(1);
+    expect(seen).toEqual(["fresh-1"]);
+  });
+
+  it("sends the token the caller gave, untouched, while it is still good", async () => {
+    const { cache, calls } = fakeCache();
+    const { seen, createClient } = tokensSeen();
+    const client = await buildServerAndClient(baseCtx({ createClient, tokens: cache }));
+
+    await callWidget(client, { ...RENEWABLE_META, [EXPIRES_AT_KEY]: Date.now() + 3_600_000 });
+
+    expect(calls).toHaveLength(0);
+    expect(seen).toEqual(["t"]);
+  });
+
+  it("renews and retries once when Hermes rejects the token mid-flight", async () => {
+    // The expiry says the token is fine; Hermes disagrees. Hermes wins.
+    const { cache, calls } = fakeCache();
+    const seen: string[] = [];
+    const client = await buildServerAndClient(
+      baseCtx({
+        tokens: cache,
+        createClient: (user) => {
+          seen.push(user.accessToken);
+          return {
+            request: async () => {
+              if (user.accessToken === "t") throw new HermesUnauthenticatedError("/api/v1/widgets/w1");
+              return { id: "w1" };
+            },
+          };
+        },
+      })
+    );
+
+    const result = await callWidget(client, { ...RENEWABLE_META, [EXPIRES_AT_KEY]: Date.now() + 3_600_000 });
+
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toBe(JSON.stringify({ id: "w1" }));
+    // Forced, because the cached copy is exactly what Hermes just refused.
+    expect(calls).toEqual([{ refreshToken: "r1", force: true }]);
+    expect(seen).toEqual(["t", "fresh-1"]);
+  });
+
+  it("gives up after one renewal rather than looping on a token Hermes keeps refusing", async () => {
+    const { cache, calls } = fakeCache();
+    const request = vi.fn(async () => {
+      throw new HermesUnauthenticatedError("/api/v1/widgets/w1");
+    });
+    const client = await buildServerAndClient(
+      baseCtx({ tokens: cache, createClient: () => ({ request }) })
+    );
+
+    const result = await callWidget(client, RENEWABLE_META);
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("UNAUTHENTICATED");
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does not retry when renewal hands back the very token that was refused", async () => {
+    // Retrying with an identical token asks Hermes the same question twice.
+    const { cache } = fakeCache(() => ({
+      accessToken: "t",
+      refreshToken: "r1",
+      expiresAt: Date.now() + 3_600_000,
+    }));
+    const request = vi.fn(async () => {
+      throw new HermesUnauthenticatedError("/api/v1/widgets/w1");
+    });
+    const client = await buildServerAndClient(
+      baseCtx({ tokens: cache, createClient: () => ({ request }) })
+    );
+
+    const result = await callWidget(client, RENEWABLE_META);
+
+    expect(result.isError).toBe(true);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a dead refresh token as SESSION_EXPIRED, not as a plain rejection", async () => {
+    // This one the caller can act on: the merchant has to sign in again.
+    const cache = {
+      accessTokenFor: async () => {
+        throw new SessionExpiredError("the refresh token has expired");
+      },
+    } as unknown as TokenCache;
+    const client = await buildServerAndClient(
+      baseCtx({
+        tokens: cache,
+        createClient: () => ({
+          request: async () => {
+            throw new HermesUnauthenticatedError("/api/v1/widgets/w1");
+          },
+        }),
+      })
+    );
+
+    const result = await callWidget(client, RENEWABLE_META);
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("SESSION_EXPIRED");
+    expect(textOf(result)).toContain("sign in again");
+  });
+
+  it("leaves a 403 alone — renewal cannot grant a permission the user lacks", async () => {
+    const { cache, calls } = fakeCache();
+    const client = await buildServerAndClient(
+      baseCtx({
+        tokens: cache,
+        createClient: () => ({
+          request: async () => {
+            throw new HermesForbiddenError("/api/v1/widgets/w1");
+          },
+        }),
+      })
+    );
+
+    const result = await callWidget(client, RENEWABLE_META);
+
+    expect(textOf(result)).toContain("FORBIDDEN");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("never renews a session the call granted no refresh token for", async () => {
+    const { cache, calls } = fakeCache();
+    const request = vi.fn(async () => {
+      throw new HermesUnauthenticatedError("/api/v1/widgets/w1");
+    });
+    const client = await buildServerAndClient(
+      baseCtx({ tokens: cache, createClient: () => ({ request }) })
+    );
+
+    // An expiry long past, but no refresh token: nothing to renew with.
+    await callWidget(client, { ...CREDENTIAL_META, [EXPIRES_AT_KEY]: 1 });
+
+    expect(calls).toHaveLength(0);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the renewed call acting on the same store as the original", async () => {
+    // Renewal replaces a credential, never a scope. A refresh response naming
+    // other stores must not widen what this call can touch.
+    const { cache } = fakeCache();
+    const stores: string[] = [];
+    const client = await buildServerAndClient(
+      baseCtx({
+        tokens: cache,
+        createClient: (user) => {
+          stores.push(user.storeId);
+          return { request: async () => ({ ok: true }) };
+        },
+      })
+    );
+
+    await callWidget(client, { ...RENEWABLE_META, [EXPIRES_AT_KEY]: 1 });
+
+    expect(stores).toEqual(["s1"]);
+  });
+
+  it("logs the renewal without ever writing a token into the log", async () => {
+    const lines: string[] = [];
+    const { cache } = fakeCache();
+    const { createClient } = tokensSeen();
+    const client = await buildServerAndClient(
+      baseCtx({
+        tokens: cache,
+        createClient,
+        logger: createLogger({ logLevel: "debug" }, (line) => lines.push(line)),
+      })
+    );
+
+    await callWidget(client, { ...RENEWABLE_META, [EXPIRES_AT_KEY]: 1 });
+
+    const joined = lines.join("\n");
+    expect(joined).toContain("renewed hermes session");
+    expect(joined).not.toContain("r1");
+    expect(joined).not.toContain("fresh-1");
   });
 });
