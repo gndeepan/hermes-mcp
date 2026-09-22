@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "hermes-mcp": {
+      "command": "npx",
+      "args": ["-y", "@superfans/hermes-mcp"],
+      "env": {
+        "HERMES_MCP_LOG_LEVEL": "info",
+        "HERMES_SINGLE_USER": "1",
+        "HERMES_ACCESS_TOKEN": "${HERMES_ACCESS_TOKEN:-}",
+        "HERMES_STORE_ID": "${HERMES_STORE_ID:-}",
+        "HERMES_REFRESH_TOKEN": "${HERMES_REFRESH_TOKEN:-}",
+        "HERMES_BASE_URL": "${HERMES_BASE_URL:-https://hermes-atlas.vjr-dev.com}",
+        "HERMES_OPENAPI_DOCS_URL": "${HERMES_OPENAPI_DOCS_URL:-https://hermes-atlas.vjr-dev.com/v3/api-docs}"
+      }
+    }
+  }
+}

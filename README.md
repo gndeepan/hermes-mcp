@@ -233,7 +233,13 @@ Either form needs `HERMES_SINGLE_USER=1` alongside the token and store id.
 Without it the fallback identity is ignored and every call is refused — see
 [Single-user fallback](#single-user-fallback).
 
-The equivalent JSON, for a client configured by file rather than by CLI:
+The equivalent JSON, for a client configured by file rather than by CLI. A
+ready-made copy is committed as [`.mcp.json`](.mcp.json), which Claude Code picks
+up automatically when this repository is the project root. It carries no
+credentials: the values are `${VAR:-default}` references resolved from your
+environment at launch, so export `HERMES_ACCESS_TOKEN` and `HERMES_STORE_ID`
+before starting the client.
+
 
 ```jsonc
 {
