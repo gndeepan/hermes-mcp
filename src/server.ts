@@ -8,7 +8,7 @@ import { registerHermesTools } from "./tools/index.js";
 import { SchemaRegistry } from "./registry/schemaRegistry.js";
 import { loadSnapshotDoc } from "./registry/snapshot.js";
 import { ENDPOINTS } from "./registry/endpoints.js";
-import { startOpenApiRefreshLoop } from "./openapiSync.js";
+import { primeRegistry } from "./openapiSync.js";
 import { HermesClient } from "./hermesClient.js";
 import { TokenCache } from "./tokenRefresh.js";
 import type { HttpCredentials } from "./userContext.js";
@@ -117,7 +117,7 @@ export const createServer = (
   // so the loop has a sync function to push refreshed schemas through.
   const { server, syncToolSchemas } = buildServer(runtime, { allowEnvFallback: config.singleUser });
 
-  startOpenApiRefreshLoop(runtime.registry, config, logger, () => {
+  void primeRegistry(runtime.registry, config, logger, () => {
     const changed = syncToolSchemas();
     if (changed.length > 0) {
       logger.info("re-advertised refreshed tool schemas", { changed });

@@ -17,51 +17,43 @@ export const fetchOpenApiDoc = async (url: string, timeoutMs: number): Promise<O
   }
 };
 
-export interface RefreshLoopConfig {
+export interface PrimeConfig {
   openApiDocsUrl: string;
   openApiFetchTimeoutMs: number;
-  openApiRefreshIntervalS: number;
 }
 
 /**
- * Fires an immediate refresh, then one every `openApiRefreshIntervalS`. Never
- * throws: a failed fetch is logged and the registry keeps its current
- * schemas. This single loop covers both the spec's "startup fallback" and
- * "steady-state fallback" cases — startup is simply the loop's first tick,
- * fired synchronously rather than waiting for the interval.
+ * Brings the registry up to the live specification, once, at startup.
  *
- * `onRefreshed` runs after each *successful* `registry.refresh`. Refreshing the
- * registry is only half the job: the caller uses this hook to re-advertise the
- * new schemas to connected MCP clients, without which a background refresh
- * changes nothing anyone can observe.
+ * There used to be a timer here, re-fetching every fifteen minutes and
+ * re-advertising whatever changed. It was removed deliberately: a tool schema
+ * that changes underneath a session in progress makes a call that was valid
+ * when the agent composed it invalid by the time it is sent, and nothing about
+ * Hermes changes often enough to pay for that. `hermes_refresh_openapi` remains
+ * for the case where it genuinely has.
+ *
+ * Never rejects. A failed fetch leaves the registry on the bundled snapshot,
+ * which is the property that makes removing the timer safe — this server has
+ * never needed the network to be useful.
+ *
+ * `onRefreshed` runs only after a *successful* load, because its job is to
+ * re-advertise schemas that actually changed. Running it on failure would
+ * announce a refresh that did not happen.
  */
-export const startOpenApiRefreshLoop = (
+export const primeRegistry = async (
   registry: SchemaRegistry,
-  config: RefreshLoopConfig,
+  config: PrimeConfig,
   logger: Logger,
   onRefreshed?: () => void
-): (() => void) => {
-  const refreshOnce = (): void => {
-    fetchOpenApiDoc(config.openApiDocsUrl, config.openApiFetchTimeoutMs)
-      .then((doc) => {
-        const stale = registry.refresh(doc, logger);
-        onRefreshed?.();
-        // `stale` at the info level as well as the per-tool error above: an
-        // operator watching this loop sees "refresh ok" every interval, and
-        // "ok" for a server quietly advertising a tool Hermes no longer has is
-        // the wrong word. The count makes the difference visible without
-        // having to grep for the errors.
-        logger.info("openapi schema refresh ok", { stale: stale.length });
-      })
-      .catch((err) => {
-        logger.warn("openapi schema refresh failed, keeping last-known-good schemas", {
-          error: errorMessage(err),
-        });
-      });
-  };
-
-  refreshOnce();
-  const timer = setInterval(refreshOnce, config.openApiRefreshIntervalS * 1000);
-  timer.unref();
-  return () => clearInterval(timer);
+): Promise<void> => {
+  try {
+    const doc = await fetchOpenApiDoc(config.openApiDocsUrl, config.openApiFetchTimeoutMs);
+    const stale = registry.refresh(doc, logger);
+    onRefreshed?.();
+    logger.info("openapi schema loaded", { stale: stale.length });
+  } catch (err) {
+    logger.warn("openapi schema fetch failed, keeping bundled snapshot", {
+      error: errorMessage(err),
+    });
+  }
 };
