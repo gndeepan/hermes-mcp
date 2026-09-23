@@ -5,8 +5,8 @@ describe("loadConfig", () => {
   it("applies defaults when the environment is empty", () => {
     const config = loadConfig({});
     expect(config.logLevel).toBe("info");
-    expect(config.hermesBaseUrl).toBe("https://hermes-atlas.vjr-dev.com");
-    expect(config.openApiDocsUrl).toBe("https://hermes-atlas.vjr-dev.com/v3/api-docs");
+    expect(config.hermesBaseUrl).toBe("https://hermes-atlas.vajro.com");
+    expect(config.openApiDocsUrl).toBe("https://hermes-atlas.vajro.com/v3/api-docs");
     expect(config.credentials).toBeNull();
   });
 

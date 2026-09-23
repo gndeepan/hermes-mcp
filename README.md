@@ -238,8 +238,8 @@ normally and refuses every uncredentialed call with `MISSING_CREDENTIALS`.
 | Variable | Default | Notes |
 |---|---|---|
 | `HERMES_MCP_LOG_LEVEL` | `info` | `silent`\|`error`\|`warn`\|`info`\|`debug` |
-| `HERMES_BASE_URL` | `https://hermes-atlas.vjr-dev.com` | Host root tool calls go to |
-| `HERMES_OPENAPI_DOCS_URL` | `https://hermes-atlas.vjr-dev.com/v3/api-docs` | Where tool schemas refresh from. Separate setting from `HERMES_BASE_URL`, but point both at the same environment. |
+| `HERMES_BASE_URL` | `https://hermes-atlas.vajro.com` | Host root tool calls go to |
+| `HERMES_OPENAPI_DOCS_URL` | `https://hermes-atlas.vajro.com/v3/api-docs` | Where tool schemas refresh from. Separate setting from `HERMES_BASE_URL`, but point both at the same environment. |
 | `HERMES_ACCESS_TOKEN` | — | Single-user fallback only; see above. Set with `HERMES_STORE_ID` or neither. |
 | `HERMES_STORE_ID` | — | See above |
 | `HERMES_REFRESH_TOKEN` | — | Optional. Lets a long local run or CI job survive an expiry. Needs the two above alongside it. |

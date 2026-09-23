@@ -160,7 +160,7 @@ dist/
 HERMES_MCP_LOG_LEVEL=info
 
 # Host root Hermes Atlas tool calls go to (NOT the OpenAPI docs URL below)
-HERMES_BASE_URL=https://hermes-atlas.vjr-dev.com
+HERMES_BASE_URL=https://hermes-atlas.vajro.com
 
 # Where the live OpenAPI spec is fetched from, to keep tool schemas current
 HERMES_OPENAPI_DOCS_URL=https://hermes-atlas.vajro.com/v3/api-docs
@@ -190,7 +190,7 @@ describe("loadConfig", () => {
   it("applies defaults when the environment is empty", () => {
     const config = loadConfig({});
     expect(config.logLevel).toBe("info");
-    expect(config.hermesBaseUrl).toBe("https://hermes-atlas.vjr-dev.com");
+    expect(config.hermesBaseUrl).toBe("https://hermes-atlas.vajro.com");
     expect(config.openApiDocsUrl).toBe("https://hermes-atlas.vajro.com/v3/api-docs");
     expect(config.openApiRefreshIntervalS).toBe(900);
     expect(config.credentials).toBeNull();
@@ -269,7 +269,7 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): HermesMcpConfi
     logLevel: (rawLogLevel as LogLevel | undefined) ?? "info",
     serverName: "hermes-mcp",
     serverVersion: "0.1.0",
-    hermesBaseUrl: env.HERMES_BASE_URL ?? "https://hermes-atlas.vjr-dev.com",
+    hermesBaseUrl: env.HERMES_BASE_URL ?? "https://hermes-atlas.vajro.com",
     openApiDocsUrl: env.HERMES_OPENAPI_DOCS_URL ?? "https://hermes-atlas.vajro.com/v3/api-docs",
     openApiRefreshIntervalS,
     openApiFetchTimeoutMs: 10_000,
@@ -3328,7 +3328,7 @@ Hermes unexpectedly rejects it, so you should rarely need to log in again.
 | Variable | Default | Notes |
 |---|---|---|
 | `HERMES_MCP_LOG_LEVEL` | `info` | `silent`\|`error`\|`warn`\|`info`\|`debug` |
-| `HERMES_BASE_URL` | `https://hermes-atlas.vjr-dev.com` | Host root tool calls and login go to |
+| `HERMES_BASE_URL` | `https://hermes-atlas.vajro.com` | Host root tool calls and login go to |
 | `HERMES_OPENAPI_DOCS_URL` | `https://hermes-atlas.vajro.com/v3/api-docs` | Where tool schemas refresh from |
 | `HERMES_OPENAPI_REFRESH_INTERVAL_S` | `900` | Background schema refresh interval |
 | `HERMES_ACCESS_TOKEN` | — | Fallback for CI/scripting; used only when no `credentials.json` exists. Set with `HERMES_STORE_ID` or neither. |

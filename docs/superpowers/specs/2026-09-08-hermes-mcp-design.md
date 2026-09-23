@@ -104,7 +104,7 @@ claude mcp add hermes-mcp -e HERMES_ACCESS_TOKEN=... -e HERMES_STORE_ID=... -- n
   schema snapshot it started with. On startup, and again every
   `HERMES_OPENAPI_REFRESH_INTERVAL_S` (default 900s), the server fetches the
   live spec from `HERMES_OPENAPI_DOCS_URL` (default
-  `https://hermes-atlas.vjr-dev.com/v3/api-docs`, the same environment as
+  `https://hermes-atlas.vajro.com/v3/api-docs`, the same environment as
   `HERMES_BASE_URL`'s default) and, for every allowlisted
   entry, rebuilds its Zod input schema from the fresh spec via the same
   resolver function the codegen script uses (`src/registry/schemaFromOpenApi.ts`
@@ -158,7 +158,7 @@ claude mcp add hermes-mcp -e HERMES_ACCESS_TOKEN=... -e HERMES_STORE_ID=... -- n
   an invalid value fails immediately naming the variable and allowed
   values, so a misconfigured server never starts and behaves oddly.
   `HERMES_BASE_URL` (where tool calls go — host root, e.g.
-  `https://hermes-atlas.vjr-dev.com`) and `HERMES_OPENAPI_DOCS_URL` (where
+  `https://hermes-atlas.vajro.com`) and `HERMES_OPENAPI_DOCS_URL` (where
   the spec is fetched from) are separate settings on separate hosts/paths
   and must not be derived from one another — but their defaults point at the
   same environment, and a deployment should keep them there: refreshing tool
