@@ -87,6 +87,44 @@ npm start         # node dist/server.js -- speaks MCP over stdio
 npm run start:http
 ```
 
+## Signing in
+
+For a single-user run (`HERMES_SINGLE_USER=1`), the server can sign you in
+itself — no copying tokens out of localStorage.
+
+Ask your assistant to call **`hermes_setup`**. If you already have a live
+session it says who you are and moves on. If not, it starts a web server on
+`127.0.0.1`, opens your browser, and returns straight away:
+
+```
+No Hermes session found.
+Opened your browser to:
+http://127.0.0.1:59711/?k=wdNNeskUDmI6FQmMecTk0T-VRYX3clrX
+```
+
+In that tab: your email, the code emailed to you, and which store to act on
+(skipped when there is only one). Then it says you are signed in, **and the
+server shuts itself down** — it exists for the login and no longer.
+
+The session is written to `~/.hermes-mcp/credentials.json`, readable only by
+you (`0600`, or an owner-only ACL on Windows). From then on the access token is
+refreshed before it expires, without anyone being asked. If the refresh token
+itself dies — leave it a day or two — the stored session is discarded and every
+tool answers `[SESSION_EXPIRED]`, naming `hermes_setup` as the remedy.
+
+Two properties worth knowing:
+
+- **Tokens never enter the browser.** The page collects an email and a code; the
+  MCP process talks to Hermes and keeps the result. Nothing sensitive goes in a
+  URL, so nothing leaks through history or a referer.
+- **The login page is not reachable by anything else on your machine.** It binds
+  loopback only, and every request must carry a single-use key from the opening
+  URL. Anything else gets a `403` with no body.
+
+`hermes_setup` only exists where one signed-in user is meaningful. The shared
+HTTP service never builds a credential store at all, and a shared stdio process
+does not advertise the tool.
+
 ## Authentication
 
 There is no login, no browser flow and no credential file. The client sends the
@@ -202,7 +240,6 @@ normally and refuses every uncredentialed call with `MISSING_CREDENTIALS`.
 | `HERMES_MCP_LOG_LEVEL` | `info` | `silent`\|`error`\|`warn`\|`info`\|`debug` |
 | `HERMES_BASE_URL` | `https://hermes-atlas.vjr-dev.com` | Host root tool calls go to |
 | `HERMES_OPENAPI_DOCS_URL` | `https://hermes-atlas.vjr-dev.com/v3/api-docs` | Where tool schemas refresh from. Separate setting from `HERMES_BASE_URL`, but point both at the same environment. |
-| `HERMES_OPENAPI_REFRESH_INTERVAL_S` | `900` | Background schema refresh interval |
 | `HERMES_ACCESS_TOKEN` | — | Single-user fallback only; see above. Set with `HERMES_STORE_ID` or neither. |
 | `HERMES_STORE_ID` | — | See above |
 | `HERMES_REFRESH_TOKEN` | — | Optional. Lets a long local run or CI job survive an expiry. Needs the two above alongside it. |
@@ -280,14 +317,20 @@ Verify with `claude mcp list` and `claude mcp get hermes-mcp`.
 | `hermes_get_widget` | `GET /api/v1/widgets/{id}` |
 | `hermes_update_widget` | `PUT /api/v1/widgets/{id}` |
 | `hermes_refresh_openapi` | — (recompiles the schemas above from the live spec) |
+| `hermes_setup` | — (signs in; see Signing in) |
+| `hermes_find_api` | — (searches the spec; calls nothing) |
+| `hermes_call_api` | any operation in the spec, by method and path |
 
 Each tool's **description** — what it returns, what it is for, and how it
 relates to the others — is written in `src/registry/endpoints.ts`, because that
 text is all a calling model sees before choosing between them. Each tool's
 **input schema** is compiled from Hermes's own OpenAPI document and refreshed
-from the live spec at startup, every 15 minutes, and whenever
-`hermes_refresh_openapi` is called, so parameter-level help is never duplicated
-by hand.
+from the live spec at startup and whenever `hermes_refresh_openapi` is called,
+so parameter-level help is never duplicated by hand.
+
+There is no longer a background refresh timer. A schema that changes underneath
+a session in progress invalidates a call the agent has already composed, and
+Hermes does not change often enough to pay for that.
 
 Adding a twelfth Hermes operation is one entry in `src/registry/endpoints.ts`;
 `test/registry/schemaRegistry.test.ts` fails loudly if it doesn't compile
@@ -298,6 +341,52 @@ an **added** one, and reports a **removed** one as `stale` while keeping the
 tool working on its last schema.
 [docs/openapi-refresh.md](https://bitbucket.org/vajro/hermes-mcp/src/main/docs/openapi-refresh.md)
 sets out each case and why they differ.
+
+### The API gateway
+
+The twelve curated tools cover theme authoring. Hermes has 356 operations, and
+`hermes_find_api` and `hermes_call_api` reach the rest.
+
+```
+hermes_find_api  { query: "user info", method?: "get", limit?: 10 }
+  -> { candidates: [ { method, path, summary, tags,
+                       pathParams[], queryParams[],
+                       requestBody, responseSchema } ], truncated }
+
+hermes_call_api  { method: "get",
+                   path: "/api/v1/stores/{id}/info",   <- the TEMPLATE, braces intact
+                   pathParams: { id: "str_123" },
+                   query?: {}, body?: {} }
+```
+
+`hermes_find_api` reads the specification and calls nothing, so it needs no
+credentials and is safe to explore with. `hermes_call_api` goes through the same
+client as every curated tool, so it inherits credential resolution, session
+renewal, `X-Request-ID` propagation and error mapping unchanged.
+
+Two things bound it.
+
+The operation must exist in the loaded document — an unknown method and path is
+refused as `UNKNOWN_OPERATION` naming the near misses, and nothing is sent. A
+path parameter made only of dots is refused too: `..` survives URL-encoding and
+would resolve `/api/v1/stores/../info` onto `/api/v1/info`, an operation the
+document does not contain.
+
+And a call can only act on the store it authenticated as. The store is
+identified by position as well as by name, because Hermes does not spell it
+consistently: any placeholder sitting directly after a `stores` segment
+(`/api/v1/stores/{id}` as well as `{storeId}`), any path or query parameter
+named `storeId`, and any `storeId` anywhere in the body including inside
+arrays. A value that is not a scalar is refused rather than skipped.
+
+**`hermes_call_api` can modify and delete data.** `post`, `put` and `delete`
+take effect immediately, with the caller's own credentials, and this server
+cannot ask for confirmation because it has no channel to a human. That
+responsibility sits with the client; the tool description says so, and every
+non-`GET` call is logged at `warn` with its method and path.
+
+Prefer the curated tools where they apply: their descriptions teach the domain
+vocabulary (theme, page, widget, custom block) that a generic path cannot.
 
 ## Inspecting the server
 
@@ -477,8 +566,19 @@ reads at startup was left out of `files`.
 ## Hard constraints
 
 1. Never write to stdout under `src/` — stdout is the MCP transport.
-2. Never persist a credential. Credentials arrive per call and live only for
-   the duration of that call.
-3. Never expose a Hermes operation that isn't a named entry in
-   `src/registry/endpoints.ts`.
+2. Never persist a credential **except for a single-user stdio run**. Narrowed,
+   deliberately, when `hermes_setup` was added: signing in once and staying
+   signed in is the entire feature, and it cannot be done without writing a
+   refresh token to disk. The rule still holds everywhere it protects anything —
+   the HTTP entry never constructs a `CredentialStore`, and a shared stdio
+   process never reads one. Credentials still arrive per call in `_meta` there.
+3. ~~Never expose a Hermes operation that isn't a named entry in
+   `src/registry/endpoints.ts`.~~ **Withdrawn**, deliberately, when
+   `hermes_call_api` was added: every operation in Hermes's OpenAPI document is
+   now reachable, including `delete`. The allowlist still decides which
+   operations get a *purpose-built tool* with a hand-written description, and it
+   is still the right place to add one — but it is no longer a security
+   boundary, and nothing should be written as though it were. What still holds:
+   a call can only act on the store it authenticated as, and no operation
+   outside the specification can be reached at all.
 4. Never log a token, at any log level.

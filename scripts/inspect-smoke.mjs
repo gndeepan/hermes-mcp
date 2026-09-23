@@ -20,6 +20,14 @@ const LAUNCHER = "node_modules/@modelcontextprotocol/inspector/clients/launcher/
  * apart from "was rejected by it".
  */
 const DEAD_HOST = [
+  // Off, explicitly. The stdio entry reads a local `.env` when this is "1", and
+  // inspector.json sets it so a human inspecting the server has credentials.
+  // Left on here, the developer's own token would satisfy the single-user
+  // fallback and the "a call with no _meta is refused" check would pass a call
+  // that was never credential-less. Scrubbing process.env is not enough: the
+  // value arrives from the config file, not the environment.
+  "-e",
+  "HERMES_SINGLE_USER=0",
   "-e",
   "HERMES_BASE_URL=http://127.0.0.1:9/",
   "-e",
@@ -105,7 +113,15 @@ const expectedToolNames = () => {
   if (names.length === 0 || !refresh) {
     throw new Error("Could not read the tool allowlist out of src/ — has the layout changed?");
   }
-  return [...names, refresh];
+  // The gateway pair is read the same way, out of the module that registers
+  // them, so this list cannot drift from the source the way a hard-coded one
+  // would.
+  const gateway = readFileSync("src/tools/gateway.ts", "utf-8");
+  const registered = [...gateway.matchAll(/registerTool\(\s*"([^"]+)"/g)].map((m) => m[1]);
+  if (registered.length !== 2) {
+    throw new Error(`Expected two gateway tools in src/tools/gateway.ts, found ${registered.length}`);
+  }
+  return [...names, refresh, ...registered];
 };
 
 process.stdout.write("Inspecting the built server over stdio via the MCP Inspector CLI\n\n");
@@ -118,7 +134,7 @@ const advertised = tools.map((t) => t.name).sort();
 
 check(
   JSON.stringify(advertised) === JSON.stringify([...expected].sort()),
-  `advertises exactly the ${expected.length} allowlisted tools`,
+  `advertises exactly the ${expected.length} tools: the allowlist, the refresh tool and the gateway`,
   advertised.length === 0 ? "nothing advertised" : `got ${advertised.join(", ")}`
 );
 
@@ -127,6 +143,13 @@ check(
   thin.length === 0,
   `every tool carries a description of at least ${MIN_DESCRIPTION_CHARS} characters`,
   thin.map((t) => `${t.name} (${t.description?.length ?? 0})`).join(", ")
+);
+
+const callApi = tools.find((t) => t.name === "hermes_call_api");
+check(
+  /MODIFY AND DELETE/.test(callApi?.description ?? ""),
+  "hermes_call_api warns in its description that it can destroy data",
+  callApi === undefined ? "tool not advertised" : "the warning is no longer in the description"
 );
 
 const missingSchema = tools.filter((t) => typeof t.inputSchema !== "object");

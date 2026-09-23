@@ -69,7 +69,20 @@ for (const key of FORWARDED_ENV) {
 if (haveCreds && mode !== "--cli") {
   // The single-user fallback: one identity for the whole session, which is all
   // the web UI and TUI can express.
-  args.push("-e", `HERMES_ACCESS_TOKEN=${accessToken}`, "-e", `HERMES_STORE_ID=${storeId}`);
+  //
+  // HERMES_SINGLE_USER is what opens that seam at all. The server refuses to
+  // fall back to the environment unless it is told it is serving one user,
+  // because in a shared process acting as the environment means acting as the
+  // wrong merchant. Passing the credentials without it is the same as passing
+  // no credentials, so the two always travel together.
+  args.push(
+    "-e",
+    `HERMES_ACCESS_TOKEN=${accessToken}`,
+    "-e",
+    `HERMES_STORE_ID=${storeId}`,
+    "-e",
+    "HERMES_SINGLE_USER=1"
+  );
   if (refreshToken !== "") args.push("-e", `HERMES_REFRESH_TOKEN=${refreshToken}`);
 }
 

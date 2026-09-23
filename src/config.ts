@@ -10,7 +10,6 @@ export interface HermesMcpConfig {
   serverVersion: string;
   hermesBaseUrl: string;
   openApiDocsUrl: string;
-  openApiRefreshIntervalS: number;
   openApiFetchTimeoutMs: number;
   /**
    * A single-user fallback identity for local runs and CI, used only when a
@@ -33,21 +32,35 @@ export interface HermesMcpConfig {
    * configured merchant is the whole point.
    */
   singleUser: boolean;
+  /**
+   * How long a tool call that triggered a browser sign-in waits for it to
+   * finish before answering SIGN_IN_REQUIRED.
+   *
+   * Below 60 seconds by default because that is the request timeout many MCP
+   * clients apply, and a call the client has already abandoned delivers
+   * nothing. A client that allows longer can raise it with
+   * `HERMES_LOGIN_WAIT_MS`. Either way the sign-in itself stays open for its
+   * full five minutes, and the next call joins it.
+   */
+  loginWaitMs: number;
 }
+
+const DEFAULT_LOGIN_WAIT_MS = 50_000;
+
+const parseLoginWait = (raw: string | undefined): number => {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_LOGIN_WAIT_MS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    throw new Error(`Invalid HERMES_LOGIN_WAIT_MS "${raw}". Use a non-negative number of milliseconds.`);
+  }
+  return Math.round(n);
+};
 
 export const loadConfig = (env: NodeJS.ProcessEnv = process.env): HermesMcpConfig => {
   const rawLogLevel = env.HERMES_MCP_LOG_LEVEL;
   if (rawLogLevel !== undefined && !LOG_LEVELS.includes(rawLogLevel as LogLevel)) {
     throw new Error(
       `Invalid HERMES_MCP_LOG_LEVEL "${rawLogLevel}". Allowed values: ${LOG_LEVELS.join(", ")}.`
-    );
-  }
-
-  const rawInterval = env.HERMES_OPENAPI_REFRESH_INTERVAL_S;
-  const openApiRefreshIntervalS = rawInterval === undefined ? 900 : Number(rawInterval);
-  if (!Number.isFinite(openApiRefreshIntervalS) || openApiRefreshIntervalS <= 0) {
-    throw new Error(
-      `Invalid HERMES_OPENAPI_REFRESH_INTERVAL_S "${rawInterval}". Must be a positive number of seconds.`
     );
   }
 
@@ -68,15 +81,15 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): HermesMcpConfi
   return {
     logLevel: (rawLogLevel as LogLevel | undefined) ?? "info",
     serverName: "hermes-mcp",
-    serverVersion: "0.1.0",
+    serverVersion: "0.2.0",
     hermesBaseUrl: env.HERMES_BASE_URL ?? "https://hermes-atlas.vjr-dev.com",
     openApiDocsUrl: env.HERMES_OPENAPI_DOCS_URL ?? "https://hermes-atlas.vjr-dev.com/v3/api-docs",
-    openApiRefreshIntervalS,
     openApiFetchTimeoutMs: 10_000,
     credentials:
       accessToken && storeId
         ? { accessToken, storeId, ...(refreshToken ? { refreshToken } : {}) }
         : null,
     singleUser: env.HERMES_SINGLE_USER === "1",
+    loginWaitMs: parseLoginWait(env.HERMES_LOGIN_WAIT_MS),
   };
 };

@@ -85,6 +85,30 @@ export class SessionExpiredError extends Error {
 }
 
 /**
+ * A sign-in was started on the user's behalf, and has not finished yet.
+ *
+ * Raised only in a single-user process, and only once the browser is already
+ * open: the call waited as long as a client will reasonably hold a tool call
+ * open, and the user is still typing their code. The message carries the URL
+ * (which holds a nonce, not a credential) so the model can hand it over if the
+ * browser did not open, and says the one thing to do next — call again, which
+ * joins the same sign-in rather than starting another.
+ */
+export class SignInRequiredError extends Error {
+  constructor(readonly url: string, readonly opened: boolean) {
+    super(
+      (opened
+        ? `Opened the user's browser to sign in to Hermes: ${url}`
+        : `Could not open a browser automatically. Ask the user to open this URL and sign in: ${url}`) +
+        " — the sign-in has not finished yet. Tell the user to complete it in the browser (email, then the " +
+        "one-time code, then their store), then call this same tool again with the same arguments. " +
+        "The sign-in link is good for 5 minutes."
+    );
+    this.name = "SignInRequiredError";
+  }
+}
+
+/**
  * A call that names one store as an argument while authenticating as another.
  *
  * `storeId` arrives twice on the store-scoped tools: once as a tool argument
@@ -144,8 +168,14 @@ const KNOWN_ERROR_CODES: [new (...args: never[]) => Error, string][] = [
   [HermesUnavailableError, "UNAVAILABLE"],
   [MissingCredentialsError, "MISSING_CREDENTIALS"],
   [SessionExpiredError, "SESSION_EXPIRED"],
+  [SignInRequiredError, "SIGN_IN_REQUIRED"],
   [StoreMismatchError, "STORE_MISMATCH"],
   [InvalidPathParameterError, "INVALID_PATH_PARAM"],
+  // Defined since the allowlist compiler needed it, but never mapped — so a
+  // caller naming an operation the document does not have got "The tool failed
+  // unexpectedly. Reference <hex>", which is accurate about nothing and
+  // actionable by no one. The gateway makes this a routine, correctable answer.
+  [MissingOperationError, "UNKNOWN_OPERATION"],
 ];
 
 /**

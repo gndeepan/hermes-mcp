@@ -7,7 +7,6 @@ describe("loadConfig", () => {
     expect(config.logLevel).toBe("info");
     expect(config.hermesBaseUrl).toBe("https://hermes-atlas.vjr-dev.com");
     expect(config.openApiDocsUrl).toBe("https://hermes-atlas.vjr-dev.com/v3/api-docs");
-    expect(config.openApiRefreshIntervalS).toBe(900);
     expect(config.credentials).toBeNull();
   });
 
@@ -17,10 +16,9 @@ describe("loadConfig", () => {
     );
   });
 
-  it("rejects a non-positive refresh interval", () => {
-    expect(() => loadConfig({ HERMES_OPENAPI_REFRESH_INTERVAL_S: "0" })).toThrow(
-      /HERMES_OPENAPI_REFRESH_INTERVAL_S/
-    );
+  it("ignores a refresh interval that is no longer a setting", () => {
+    // The timer is gone; a value left behind in someone's .env must not throw.
+    expect(() => loadConfig({ HERMES_OPENAPI_REFRESH_INTERVAL_S: "0" })).not.toThrow();
   });
 
   it("requires access token and store id together", () => {
