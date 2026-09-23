@@ -20,12 +20,31 @@ export interface LoginSession {
  * interface and tested with a fake, so the wire format lives here alone. Both
  * steps mirror the dashboard's own login, which is the reference for them.
  */
+/** One store in an admin's search results, as the picker shows it. */
+export interface StoreMatch {
+  storeId: string;
+  name: string;
+  appId: number | null;
+  /**
+   * False for a store Hermes knows but has no modern store id for. The
+   * dashboard lists these greyed out ("Modernization not enabled for this
+   * store"), and so does the picker: there is nothing the MCP could act on.
+   */
+  enabled: boolean;
+}
+
 export interface HermesLogin {
   sendCode(email: string): Promise<void>;
   verifyCode(email: string, code: string): Promise<LoginSession>;
+  /** Searches every store, for an admin choosing one. Uses the new session's own token. */
+  searchStores(accessToken: string, query: string): Promise<StoreMatch[]>;
 }
 
 const SEND_PATH = "/api/v1/otp/email/send";
+const SEARCH_PATH = "/api/v1/stores/search";
+
+/** More than anyone reads in a picker; bounds the page, not the query. */
+const MAX_MATCHES = 50;
 
 /**
  * Where the verify step posts, exactly as the dashboard's own login does it
@@ -142,6 +161,35 @@ const post = async (
   return parsed;
 };
 
+/** One JSON GET, failing the same way `post` does. */
+const get = async (url: string, timeoutMs: number, headers: Record<string, string>): Promise<unknown> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+  try {
+    response = await fetch(url, { method: "GET", headers: { Accept: "application/json", ...headers }, signal: controller.signal });
+  } catch (err) {
+    throw new HermesUnavailableError(url, err);
+  } finally {
+    clearTimeout(timer);
+  }
+  const text = await response.text();
+  let parsed: unknown;
+  try {
+    parsed = text === "" ? null : JSON.parse(text);
+  } catch {
+    parsed = null;
+  }
+  if (!response.ok) {
+    const detail =
+      (parsed as { error?: { detail?: string; message?: string } } | null)?.error?.detail ??
+      (parsed as { error?: { message?: string } } | null)?.error?.message ??
+      `HTTP ${response.status}`;
+    throw new HermesRejectedError(url, response.status, detail);
+  }
+  return parsed;
+};
+
 export class HttpHermesLogin implements HermesLogin {
   constructor(
     private readonly baseUrl: string,
@@ -165,5 +213,39 @@ export class HttpHermesLogin implements HermesLogin {
       if (err instanceof LoginContractError) throw err;
       throw new LoginContractError(errorMessage(err));
     }
+  }
+
+  /**
+   * The dashboard's store search, exactly as it sends it
+   * (`dashboard/packages/api/services/store.ts`, `getStoreList`): the term as
+   * both `dto` and `query`, and `type` APPID for an all-digit term, TAG for
+   * anything else.
+   *
+   * Hermes returns each store's Shopify storefront token alongside it. That is
+   * dropped here, the moment it arrives, so it cannot reach the browser.
+   */
+  async searchStores(accessToken: string, query: string): Promise<StoreMatch[]> {
+    const term = query.trim().toLowerCase();
+    const url = new URL(SEARCH_PATH, this.baseUrl);
+    url.searchParams.set("dto", term);
+    url.searchParams.set("query", term);
+    url.searchParams.set("type", /^\d+$/.test(term) ? "APPID" : "TAG");
+
+    const payload = await get(url.toString(), this.timeoutMs, { Authorization: `Bearer ${accessToken}` });
+    const root = payload !== null && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+    const list = Array.isArray(payload) ? payload : Array.isArray(root.data) ? root.data : [];
+
+    const matches = list.flatMap((entry): StoreMatch[] => {
+      if (entry === null || typeof entry !== "object") return [];
+      const store = entry as Record<string, unknown>;
+      const storeId = asString(store.storeId);
+      const name = asString(store.name);
+      const appId = typeof store.appId === "number" && Number.isFinite(store.appId) ? store.appId : null;
+      if (storeId === "" && name === "") return [];
+      return [{ storeId, name: name || storeId, appId, enabled: storeId !== "" }];
+    });
+
+    // Usable stores first, as the dashboard sorts them.
+    return matches.sort((a, b) => Number(b.enabled) - Number(a.enabled)).slice(0, MAX_MATCHES);
   }
 }

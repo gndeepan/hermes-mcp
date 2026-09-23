@@ -40,6 +40,7 @@ const STORED: StoredSession = {
 const fakeLogin = (): HermesLogin => ({
   sendCode: vi.fn(async () => undefined),
   verifyCode: vi.fn(async () => SIGNED_IN),
+  searchStores: vi.fn(async () => []),
 });
 
 /** What the merchant does in the browser tab: email, then code. One store picks itself. */

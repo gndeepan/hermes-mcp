@@ -30,11 +30,21 @@ export interface PendingLogin {
 interface FlowState {
   email?: string;
   session?: LoginSession;
+  /**
+   * Names of stores an admin's searches returned, by store id. Used to label
+   * the store they pick; the name posted by a form is never trusted for that.
+   */
+  searched: Map<string, string>;
 }
 
 const html = (res: ServerResponse, status: number, body: string): void => {
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(body);
+};
+
+const json = (res: ServerResponse, status: number, body: unknown): void => {
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(JSON.stringify(body));
 };
 
 const redirect = (res: ServerResponse, to: string): void => {
@@ -77,7 +87,7 @@ const readBody = async (req: IncomingMessage): Promise<URLSearchParams> => {
 export const startLoginServer = async (options: LoginServerOptions): Promise<PendingLogin> => {
   const { login, store, logger } = options;
   const nonce = randomBytes(24).toString("base64url");
-  const state: FlowState = {};
+  const state: FlowState = { searched: new Map() };
 
   let settle: (value: StoredSession | null) => void;
   const finished = new Promise<StoredSession | null>((resolve) => {
@@ -148,6 +158,22 @@ export const startLoginServer = async (options: LoginServerOptions): Promise<Pen
         return;
       }
 
+      // POST /resend     a fresh code to the same address
+      if (req.method === "POST" && url.pathname === "/resend") {
+        const email = state.email;
+        if (email === undefined) {
+          redirect(res, `/?k=${nonce}`);
+          return;
+        }
+        try {
+          await login.sendCode(email);
+          html(res, 200, codePage(nonce, email, undefined, "We sent you a new code."));
+        } catch (err) {
+          html(res, 502, codePage(nonce, email, errorMessage(err)));
+        }
+        return;
+      }
+
       // GET /otp         the code screen
       if (req.method === "GET" && url.pathname === "/otp") {
         if (state.email === undefined) {
@@ -204,7 +230,34 @@ export const startLoginServer = async (options: LoginServerOptions): Promise<Pen
           redirect(res, `/?k=${nonce}`);
           return;
         }
-        html(res, 200, storePage(nonce, state.session.stores));
+        html(res, 200, storePage(nonce, state.session.stores, undefined, state.session.isAdmin));
+        return;
+      }
+
+      // GET /stores/search   an admin looking for a store to act on
+      //
+      // Answered here rather than by the browser calling Hermes, so the new
+      // session's token never leaves this process. Admins only: everyone else
+      // picks from the stores Hermes already listed for them.
+      if (req.method === "GET" && url.pathname === "/stores/search") {
+        const session = state.session;
+        if (session === undefined || !session.isAdmin) {
+          json(res, 403, { error: "Store search is only available to admins." });
+          return;
+        }
+        const query = (url.searchParams.get("q") ?? "").trim();
+        if (query === "" || query.length > 100) {
+          json(res, 400, { error: "Type a store name or App ID." });
+          return;
+        }
+        try {
+          const stores = await login.searchStores(session.accessToken, query);
+          for (const match of stores) if (match.enabled) state.searched.set(match.storeId, match.name);
+          json(res, 200, { stores });
+        } catch (err) {
+          logger.warn("store search failed", { error: errorMessage(err) });
+          json(res, 502, { error: "Couldn't search stores just now. Try again." });
+        }
         return;
       }
 
@@ -217,11 +270,11 @@ export const startLoginServer = async (options: LoginServerOptions): Promise<Pen
         }
         const storeId = (body.get("storeId") ?? "").trim();
         if (storeId === "") {
-          html(res, 400, storePage(nonce, session.stores, "Choose a store."));
+          html(res, 400, storePage(nonce, session.stores, "Choose a store.", session.isAdmin));
           return;
         }
-        const named = session.stores.find((s) => s.id === storeId);
-        finish(session, storeId, named?.name ?? storeId, res);
+        const named = session.stores.find((s) => s.id === storeId)?.name ?? state.searched.get(storeId);
+        finish(session, storeId, named ?? storeId, res);
         return;
       }
 

@@ -45,3 +45,39 @@ describe("HttpHermesLogin.verifyCode", () => {
     expect((err as Error).message).toContain("Invalid credentials");
   });
 });
+
+describe("HttpHermesLogin.searchStores", () => {
+  it("searches the way the dashboard does, and drops the storefront token", async () => {
+    const fetchMock = respond(200, {
+      data: [
+        { storeId: "", name: "Legacy", appId: 17, tenant: 1, sfAccessToken: "sf-1" },
+        { storeId: "str_9", name: "Found", appId: 4242, tenant: 1, sfAccessToken: "sf-2" },
+      ],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const stores = await new HttpHermesLogin(BASE).searchStores("acc", "Found");
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const u = new URL(url);
+    expect(u.pathname).toBe("/api/v1/stores/search");
+    expect(Object.fromEntries(u.searchParams)).toEqual({ dto: "found", query: "found", type: "TAG" });
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer acc");
+    // Usable first, and nothing but what the picker shows.
+    expect(stores).toEqual([
+      { storeId: "str_9", name: "Found", appId: 4242, enabled: true },
+      { storeId: "", name: "Legacy", appId: 17, enabled: false },
+    ]);
+    expect(JSON.stringify(stores)).not.toContain("sf-");
+  });
+
+  it("searches by App ID when the term is all digits", async () => {
+    const fetchMock = respond(200, { data: [] });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await new HttpHermesLogin(BASE).searchStores("acc", "4242");
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(new URL(url).searchParams.get("type")).toBe("APPID");
+  });
+});

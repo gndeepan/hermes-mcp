@@ -33,6 +33,7 @@ const fakeLogin = (): HermesLogin => ({
   verifyCode: vi.fn(async () => {
     throw new Error("not reached");
   }),
+  searchStores: vi.fn(async () => []),
 });
 
 const started: AuthContext[] = [];
