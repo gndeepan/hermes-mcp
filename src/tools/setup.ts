@@ -36,25 +36,73 @@ const DESCRIPTION =
   "store. Do not wait or poll: tell the user to finish in the browser, then call this tool again to " +
   "confirm. The server shuts itself down as soon as sign-in completes.";
 
-/** Opens the platform's browser, and says whether it managed to. */
-const openBrowser = (url: string): boolean => {
-  const [command, args] =
-    process.platform === "win32"
-      ? // `start` is a cmd builtin, and the empty string is the window title —
-        // without it, cmd treats a quoted URL as the title and opens nothing.
-        (["cmd", ["/c", "start", "", url]] as const)
-      : process.platform === "darwin"
-        ? (["open", [url]] as const)
-        : (["xdg-open", [url]] as const);
-  try {
-    const child = spawn(command, [...args], { detached: true, stdio: "ignore", windowsHide: true });
-    child.unref();
-    return true;
-  } catch {
-    // Headless boxes, locked-down machines, SSH sessions. Not a failure — the
-    // URL is in the reply and can be opened by hand.
-    return false;
+/**
+ * Runs one opener, and answers whether it actually started.
+ *
+ * The asynchrony is not incidental. `spawn` does **not** throw when the binary
+ * is missing: it returns a ChildProcess and emits `error` on a later tick, and
+ * an unhandled `error` event on an EventEmitter takes the process down with it.
+ * A `try/catch` around `spawn` catches none of that. So the answer comes from
+ * racing the two events Node actually emits — `spawn` for success, `error` for
+ * a missing or unrunnable binary — which is also the only way to know whether a
+ * browser really opened before telling the user it did.
+ *
+ * Exported for the test that pins this, because the failure it prevents —
+ * `hermes_setup` killing the server on a headless Linux box with no `xdg-open`
+ * — cannot be reproduced on a platform where the opener always exists.
+ */
+export const openUrlWith = (command: string, args: string[]): Promise<boolean> =>
+  new Promise((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true });
+    } catch {
+      // Some failures (an invalid command string) still land here.
+      resolve(false);
+      return;
+    }
+    // Both listeners attached before either can fire. `once` on `error` is what
+    // keeps the event handled, and therefore non-fatal.
+    child.once("error", () => resolve(false));
+    child.once("spawn", () => {
+      // Only after a successful start: unref'ing a process that never began has
+      // nothing to detach from.
+      child.unref();
+      resolve(true);
+    });
+  });
+
+/**
+ * The openers to try, in order, for this platform.
+ *
+ * Linux gets a chain rather than one command. `xdg-open` is the convention but
+ * is not present on a minimal image, and a desktop that lacks it often still
+ * has one of the others. Windows and macOS each have exactly one that ships
+ * with the OS, so there is nothing to fall back to.
+ */
+const openersFor = (url: string): [string, string[]][] => {
+  if (process.platform === "win32") {
+    // `start` is a cmd builtin, and the empty string is the window title —
+    // without it, cmd treats a quoted URL as the title and opens nothing.
+    return [["cmd", ["/c", "start", "", url]]];
   }
+  if (process.platform === "darwin") return [["open", [url]]];
+  return [
+    ["xdg-open", [url]],
+    ["sensible-browser", [url]],
+    ["x-www-browser", [url]],
+    ["www-browser", [url]],
+  ];
+};
+
+/** Opens the platform's browser, and says whether it managed to. */
+const openBrowser = async (url: string): Promise<boolean> => {
+  for (const [command, args] of openersFor(url)) {
+    if (await openUrlWith(command, args)) return true;
+  }
+  // Headless boxes, locked-down machines, SSH sessions. Not a failure — the URL
+  // is in the reply and can be opened by hand.
+  return false;
 };
 
 const humanDuration = (ms: number): string => {
@@ -104,7 +152,7 @@ export const registerSetupTool = (server: McpServer, auth: AuthContext): void =>
           auth.pending.current = undefined;
         });
 
-        const opened = openBrowser(pending.url);
+        const opened = await openBrowser(pending.url);
         auth.logger.info("login started", { opened });
 
         return text(
