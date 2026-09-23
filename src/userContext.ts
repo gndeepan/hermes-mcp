@@ -91,6 +91,16 @@ const hasMeta = (meta: Record<string, unknown> | undefined, key: string, bare: s
   meta !== undefined && (key in meta || bare in meta);
 
 /**
+ * Whether this call's `_meta` names an identity of its own.
+ *
+ * Such a call belongs to its caller, not to whoever is signed in on this
+ * machine, so nothing done on the fallback's behalf — a browser sign-in above
+ * all — may be done for it.
+ */
+export const callAssertsIdentity = (meta: Record<string, unknown> | undefined): boolean =>
+  hasMeta(meta, ACCESS_TOKEN_KEY, "accessToken") || hasMeta(meta, STORE_ID_KEY, "storeId");
+
+/**
  * The single-user environment identity, which may now also carry a refresh
  * token so a long local run does not die at the first expiry.
  */
@@ -186,8 +196,7 @@ export const userContextFrom = (
     };
   }
 
-  const callAsserts =
-    hasMeta(meta, ACCESS_TOKEN_KEY, "accessToken") || hasMeta(meta, STORE_ID_KEY, "storeId");
+  const callAsserts = callAssertsIdentity(meta);
 
   const accessToken = callAsserts
     ? readMeta(meta, ACCESS_TOKEN_KEY, "accessToken")

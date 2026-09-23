@@ -32,7 +32,29 @@ export interface HermesMcpConfig {
    * configured merchant is the whole point.
    */
   singleUser: boolean;
+  /**
+   * How long a tool call that triggered a browser sign-in waits for it to
+   * finish before answering SIGN_IN_REQUIRED.
+   *
+   * Below 60 seconds by default because that is the request timeout many MCP
+   * clients apply, and a call the client has already abandoned delivers
+   * nothing. A client that allows longer can raise it with
+   * `HERMES_LOGIN_WAIT_MS`. Either way the sign-in itself stays open for its
+   * full five minutes, and the next call joins it.
+   */
+  loginWaitMs: number;
 }
+
+const DEFAULT_LOGIN_WAIT_MS = 50_000;
+
+const parseLoginWait = (raw: string | undefined): number => {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_LOGIN_WAIT_MS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    throw new Error(`Invalid HERMES_LOGIN_WAIT_MS "${raw}". Use a non-negative number of milliseconds.`);
+  }
+  return Math.round(n);
+};
 
 export const loadConfig = (env: NodeJS.ProcessEnv = process.env): HermesMcpConfig => {
   const rawLogLevel = env.HERMES_MCP_LOG_LEVEL;
@@ -68,5 +90,6 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): HermesMcpConfi
         ? { accessToken, storeId, ...(refreshToken ? { refreshToken } : {}) }
         : null,
     singleUser: env.HERMES_SINGLE_USER === "1",
+    loginWaitMs: parseLoginWait(env.HERMES_LOGIN_WAIT_MS),
   };
 };

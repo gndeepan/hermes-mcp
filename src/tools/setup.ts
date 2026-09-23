@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
 import * as z from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
-import { errorMessage, toToolResult } from "../errors.js";
-import { EXPIRY_SKEW_MS } from "../tokenRefresh.js";
+import { SessionExpiredError, errorMessage, toToolResult } from "../errors.js";
+import { EXPIRY_SKEW_MS, type TokenCache } from "../tokenRefresh.js";
 import { startLoginServer, type PendingLogin } from "../auth/loginServer.js";
-import type { CredentialStore } from "../auth/credentialStore.js";
+import type { CredentialStore, StoredSession } from "../auth/credentialStore.js";
 import type { HermesLogin } from "../auth/hermesLogin.js";
 import type { Logger } from "../logging.js";
 import type { ToolReturn } from "./index.js";
@@ -23,14 +23,29 @@ export interface AuthContext {
   logger: Logger;
   /** The one login in flight, if any. Mutable, and deliberately shared per process. */
   pending: { current?: PendingLogin };
+  /**
+   * Set once Hermes has refused the `.env` session's refresh token.
+   *
+   * `.env` normally wins over the stored session (see `fallbackCredentials`),
+   * which is right while it works and a trap once it does not: a dead `.env`
+   * token would shadow every browser sign-in, so signing in could never fix
+   * it. Retiring it for the rest of the process lets the stored session, or a
+   * new sign-in, take over. Mutable, like `pending`.
+   */
+  envRetired?: boolean;
+  /** Injected by tests, so proving the flow does not open a real browser. */
+  openBrowser?: (url: string) => Promise<boolean>;
 }
 
 export const SETUP_TOOL = "hermes_setup";
 
 const DESCRIPTION =
-  "Sign in to Hermes, or report who is already signed in. Call this first when any other hermes_* tool " +
-  "reports MISSING_CREDENTIALS or SESSION_EXPIRED. If a valid session already exists this returns who it " +
-  "belongs to and how long it lasts, and opens nothing. Otherwise it starts a small local web server on " +
+  "Sign in to Hermes, or report who is already signed in. You rarely need to call this: any other hermes_* " +
+  "tool called while nobody is signed in opens the sign-in itself, waits for it, and then answers — and if " +
+  "the user is still signing in when it stops waiting, it returns SIGN_IN_REQUIRED, and calling that same " +
+  "tool again is the whole remedy. Call this directly when the user asks to sign in or to see who is signed " +
+  "in. If a valid session already exists this returns who it belongs to and how long it lasts, and opens " +
+  "nothing; a session whose access token has lapsed is renewed silently. Otherwise it starts a small local web server on " +
   "127.0.0.1, opens the user's browser to it, and returns immediately with the URL — sign-in happens in " +
   "that browser tab, where the user enters their email, the one-time code they are emailed, and picks a " +
   "store. Do not wait or poll: tell the user to finish in the browser, then call this tool again to " +
@@ -105,6 +120,42 @@ const openBrowser = async (url: string): Promise<boolean> => {
   return false;
 };
 
+/** A browser sign-in, started by this call or joined from an earlier one. */
+export interface LoginInProgress {
+  url: string;
+  /** Resolves with the saved session, or null if the window closed without one. */
+  finished: Promise<StoredSession | null>;
+  /** Whether a browser was opened by *this* call. False when joining. */
+  opened: boolean;
+  /** True when a sign-in was already open and this call joined it. */
+  joined: boolean;
+}
+
+/**
+ * Starts a browser sign-in, or joins the one already open.
+ *
+ * The one place a login server is started, shared by `hermes_setup` and by a
+ * tool call that found nobody signed in. Two callers starting two servers
+ * would leave two live logins racing to write the same file.
+ */
+export const beginLogin = async (auth: AuthContext): Promise<LoginInProgress> => {
+  const inFlight = auth.pending.current;
+  if (inFlight !== undefined) {
+    return { url: inFlight.url, finished: inFlight.finished, opened: false, joined: true };
+  }
+
+  const pending = await startLoginServer({ login: auth.login, store: auth.store, logger: auth.logger });
+  auth.pending.current = pending;
+  void pending.finished.finally(() => {
+    // Only this login's own slot: a later one may already have taken it.
+    if (auth.pending.current === pending) auth.pending.current = undefined;
+  });
+
+  const opened = await (auth.openBrowser ?? openBrowser)(pending.url);
+  auth.logger.info("login started", { opened });
+  return { url: pending.url, finished: pending.finished, opened, joined: false };
+};
+
 const humanDuration = (ms: number): string => {
   if (ms <= 0) return "0m";
   const hours = Math.floor(ms / 3_600_000);
@@ -114,16 +165,52 @@ const humanDuration = (ms: number): string => {
 
 const text = (body: string): ToolReturn => ({ content: [{ type: "text", text: body }] });
 
-export const registerSetupTool = (server: McpServer, auth: AuthContext): void => {
+/**
+ * Renews a stored session whose access token has lapsed, and saves the result.
+ *
+ * An expired access token is not an expired session: the refresh token usually
+ * outlives it by days. Sending the merchant to the browser for what one POST
+ * would fix is exactly the friction the refresh token exists to remove.
+ *
+ * Null means the refresh token is dead too, and only a sign-in will do. A
+ * Hermes outage is thrown instead — it says nothing about the session, and
+ * treating it as "signed out" would discard one that is fine.
+ */
+const renewStored = async (
+  auth: AuthContext,
+  tokens: TokenCache,
+  existing: StoredSession
+): Promise<StoredSession | null> => {
+  try {
+    const renewed = await tokens.accessTokenFor(existing.refreshToken, { force: true });
+    const session = { ...existing, ...renewed };
+    auth.store.save(session);
+    auth.logger.info("renewed stored hermes session", { storeId: existing.storeId });
+    return session;
+  } catch (err) {
+    if (!(err instanceof SessionExpiredError)) throw err;
+    auth.store.clear();
+    return null;
+  }
+};
+
+export const registerSetupTool = (
+  server: McpServer,
+  auth: AuthContext,
+  tokens?: TokenCache
+): void => {
   server.registerTool(
     SETUP_TOOL,
     { description: DESCRIPTION, inputSchema: z.object({}) },
     (async (): Promise<ToolReturn> => {
       try {
-        const existing = auth.store.read();
+        let existing = auth.store.read();
         // Usable means "will still be usable by the time a call lands", which is
         // why the skew is subtracted. A session with thirty seconds left is a
         // session that is about to fail mid-conversation.
+        if (existing !== null && Date.now() >= existing.expiresAt - EXPIRY_SKEW_MS && tokens !== undefined) {
+          existing = (await renewStored(auth, tokens, existing)) ?? existing;
+        }
         if (existing !== null && Date.now() < existing.expiresAt - EXPIRY_SKEW_MS) {
           return text(
             `Signed in as ${existing.userId} on ${existing.storeName} (${existing.storeId}).\n` +
@@ -131,37 +218,24 @@ export const registerSetupTool = (server: McpServer, auth: AuthContext): void =>
           );
         }
 
+        const { url, opened, joined } = await beginLogin(auth);
+
         // A second call while a browser tab is already open hands back the same
-        // URL. Starting a rival server would leave two live logins racing to
-        // write the same file.
-        const inFlight = auth.pending.current;
-        if (inFlight !== undefined) {
+        // URL rather than racing a second server.
+        if (joined) {
           return text(
-            `A sign-in is already waiting in your browser:\n${inFlight.url}\n\n` +
+            `A sign-in is already waiting in your browser:\n${url}\n\n` +
               "Finish there, then call this tool again to confirm."
           );
         }
-
-        const pending = await startLoginServer({
-          login: auth.login,
-          store: auth.store,
-          logger: auth.logger,
-        });
-        auth.pending.current = pending;
-        void pending.finished.finally(() => {
-          auth.pending.current = undefined;
-        });
-
-        const opened = await openBrowser(pending.url);
-        auth.logger.info("login started", { opened });
 
         return text(
           (existing === null
             ? "No Hermes session found."
             : "Your Hermes session has expired.") +
             (opened
-              ? `\nOpened your browser to:\n${pending.url}`
-              : `\nCould not open a browser automatically. Open this URL yourself:\n${pending.url}`) +
+              ? `\nOpened your browser to:\n${url}`
+              : `\nCould not open a browser automatically. Open this URL yourself:\n${url}`) +
             "\n\nSign in there with your email and the code we email you, then call this tool again to confirm. " +
             "The link is good for 5 minutes."
         );

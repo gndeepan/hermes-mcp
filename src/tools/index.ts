@@ -7,15 +7,18 @@ import type { SchemaRegistry } from "../registry/schemaRegistry.js";
 import type { CompiledEndpoint } from "../registry/schemaFromOpenApi.js";
 import { ENDPOINTS } from "../registry/endpoints.js";
 import { registerGatewayTools } from "./gateway.js";
-import { registerSetupTool, type AuthContext } from "./setup.js";
+import { beginLogin, registerSetupTool, type AuthContext } from "./setup.js";
+import type { StoredSession } from "../auth/credentialStore.js";
 import { OperationIndex } from "../registry/operations.js";
 import type { HermesRequester } from "../hermesClient.js";
-import { userContextFrom, type EnvCredentials, type HttpCredentials, type UserContext } from "../userContext.js";
+import { callAssertsIdentity, userContextFrom, type EnvCredentials, type HttpCredentials, type UserContext } from "../userContext.js";
 import { fetchOpenApiDoc, type PrimeTarget } from "../openapiSync.js";
 import { isStale, type SessionTokens, type TokenCache } from "../tokenRefresh.js";
-import { SessionExpiredError } from "../errors.js";
 import {
   HermesUnauthenticatedError,
+  MissingCredentialsError,
+  SessionExpiredError,
+  SignInRequiredError,
   InvalidPathParameterError,
   StoreMismatchError,
   toToolResult,
@@ -80,7 +83,13 @@ export interface ToolContext {
  * handlers stay unit-testable without standing up a transport.
  */
 export interface CallContext {
-  mcpReq?: { _meta?: Record<string, unknown> };
+  mcpReq?: {
+    _meta?: Record<string, unknown>;
+    /** Cancels a wait for sign-in when the client gives up on the call. */
+    signal?: AbortSignal;
+    /** Sends progress while a call waits for the user to sign in. */
+    notify?: (notification: { method: string; params?: Record<string, unknown> }) => Promise<void>;
+  };
 }
 
 interface BuiltRequest {
@@ -210,7 +219,7 @@ const assertActingOnOwnStore = (args: Record<string, unknown>, user: UserContext
  * file written weeks ago by `hermes_setup` should not quietly override it.
  */
 export const fallbackCredentials = (ctx: ToolContext): EnvCredentials | null => {
-  if (ctx.config.credentials !== null) return ctx.config.credentials;
+  if (ctx.config.credentials !== null && ctx.auth?.envRetired !== true) return ctx.config.credentials;
 
   const stored = ctx.auth?.store.read();
   if (!stored) return null;
@@ -223,15 +232,45 @@ export const fallbackCredentials = (ctx: ToolContext): EnvCredentials | null => 
 };
 
 /**
- * Forgets a session Hermes has just declared dead.
+ * Forgets a session Hermes has just declared dead — only that one.
  *
  * Without this the server would keep presenting a credential it knows is
- * finished, failing every call the same way forever, and `hermes_setup` would
- * keep reporting the merchant as signed in. Clearing turns a permanent failure
- * into the one thing that fixes it: a prompt to sign in again.
+ * finished, failing every call the same way forever. The session is matched by
+ * its tokens rather than assumed: a dead `.env` token must not delete a stored
+ * sign-in that is fine, and a dead stored session must not leave `.env`
+ * shadowing the sign-in that replaces it.
  */
-const forgetDeadSession = (ctx: ToolContext, err: unknown): void => {
-  if (err instanceof SessionExpiredError) ctx.auth?.store.clear();
+const forgetDeadSession = (ctx: ToolContext, user: UserContext): void => {
+  const auth = ctx.auth;
+  if (auth === undefined) return;
+
+  const env = ctx.config.credentials;
+  if (env !== null && env.accessToken === user.accessToken) {
+    auth.envRetired = true;
+    auth.logger.warn("retired the .env hermes session; it can no longer be renewed");
+    return;
+  }
+  const stored = auth.store.read();
+  if (stored !== null && (stored.accessToken === user.accessToken || stored.refreshToken === user.refreshToken)) {
+    auth.store.clear();
+  }
+};
+
+/**
+ * Saves a renewal back into the stored session it came from.
+ *
+ * Hermes may rotate the refresh token on every renewal. Kept only in memory,
+ * the rotated token dies with the process, and the next start presents the old
+ * one — which Hermes refuses, sending a merchant who was signed in back to the
+ * browser. Matched on the refresh token that was spent, so a renewal of some
+ * other session (a caller's `_meta`, the `.env` one) never lands in this file.
+ */
+const persistRenewal = (ctx: ToolContext, spent: string, tokens: SessionTokens): void => {
+  const auth = ctx.auth;
+  if (auth === undefined) return;
+  const stored = auth.store.read();
+  if (stored === null || stored.refreshToken !== spent) return;
+  auth.store.save({ ...stored, ...tokens });
 };
 
 /** How a renewal came to happen, for the log line. Never the tokens themselves. */
@@ -272,7 +311,9 @@ export const sendWithRenewal = async (
 
   let acting = user;
   if (user.expiresAt !== undefined && isStale({ ...user, refreshToken, expiresAt: user.expiresAt })) {
-    acting = withTokens(user, await cache.accessTokenFor(refreshToken));
+    const renewed = await cache.accessTokenFor(refreshToken);
+    persistRenewal(ctx, refreshToken, renewed);
+    acting = withTokens(user, renewed);
     onRenewal("expired");
   }
 
@@ -283,13 +324,156 @@ export const sendWithRenewal = async (
 
     // Forced: the cached token is precisely the one Hermes just refused, so
     // handing it back would retry the same rejected request.
-    const renewed = await cache.accessTokenFor(refreshToken, { force: true });
+    // `acting.refreshToken`, not the caller's original: if the expiry path
+    // above already renewed and Hermes rotated, the original is spent.
+    const spent = acting.refreshToken ?? refreshToken;
+    const renewed = await cache.accessTokenFor(spent, { force: true });
     // An identical token means the renewal changed nothing. Sending it again
     // asks Hermes the same question and gets the same answer.
     if (renewed.accessToken === acting.accessToken) throw err;
 
+    persistRenewal(ctx, spent, renewed);
     onRenewal("rejected");
     return send(withTokens(user, renewed));
+  }
+};
+
+/**
+ * Whether this call may be signed in through the browser on the user's behalf.
+ *
+ * Only in a single-user process (the only kind with an `auth`), and only for a
+ * call that is relying on the fallback identity. A call that brought its own
+ * credentials — over HTTP or in `_meta` — belongs to its caller, and a browser
+ * opening on this machine for it would be signing in the wrong person.
+ */
+const canSignIn = (ctx: ToolContext, call: CallContext): boolean =>
+  ctx.auth !== undefined &&
+  ctx.httpCredentials === undefined &&
+  ctx.allowEnvFallback !== false &&
+  !callAssertsIdentity(call?.mcpReq?._meta);
+
+/** How often a waiting call tells the client it is still alive. */
+const PROGRESS_EVERY_MS = 5_000;
+
+/**
+ * Opens (or joins) a browser sign-in, and waits for it on this call's behalf.
+ *
+ * Waiting is what lets the user's first question simply be answered: the
+ * browser opens, they sign in, and the same call carries on with their
+ * request. The wait is bounded by `loginWaitMs` because the client will not
+ * hold a tool call open forever. Past that, the answer is SIGN_IN_REQUIRED,
+ * and the sign-in itself stays open — the next call joins it and waits again.
+ *
+ * Progress notifications go out while waiting, when the client asked for them,
+ * so a client that extends its timeout on progress keeps the call alive.
+ */
+const signInForCall = async (ctx: ToolContext, call: CallContext): Promise<UserContext> => {
+  const auth = ctx.auth!;
+  const login = await beginLogin(auth);
+  auth.logger.info("waiting for browser sign-in", { joined: login.joined });
+
+  const progressToken = call?.mcpReq?._meta?.progressToken;
+  const notify = call?.mcpReq?.notify;
+  const started = Date.now();
+  const ticker =
+    progressToken !== undefined && notify !== undefined
+      ? setInterval(() => {
+          void notify({
+            method: "notifications/progress",
+            params: {
+              progressToken,
+              progress: Date.now() - started,
+              message: `Waiting for sign-in in the browser: ${login.url}`,
+            },
+          }).catch(() => undefined);
+        }, PROGRESS_EVERY_MS)
+      : undefined;
+
+  let session: StoredSession | null | undefined;
+  try {
+    session = await within(login.finished, ctx.config.loginWaitMs, call?.mcpReq?.signal);
+  } finally {
+    if (ticker !== undefined) clearInterval(ticker);
+  }
+
+  // `null` is a sign-in that closed without a session (the deadline, or an
+  // account with no stores). Either way, not something this call can use.
+  if (session === undefined || session === null) {
+    throw new SignInRequiredError(login.url, login.opened || login.joined);
+  }
+  return userContextFrom(call?.mcpReq?._meta, undefined, fallbackCredentials(ctx));
+};
+
+/** Settles with the promise's value, or with undefined on timeout or abort. */
+const within = <T>(promise: Promise<T>, ms: number, signal?: AbortSignal): Promise<T | undefined> =>
+  new Promise((resolve) => {
+    const done = (value: T | undefined): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(value);
+    };
+    const onAbort = (): void => done(undefined);
+    const timer = setTimeout(() => done(undefined), ms);
+    if (signal?.aborted === true) {
+      done(undefined);
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    promise.then(done, () => done(undefined));
+  });
+
+/** Who this call acts as, signing the user in first if nobody is. */
+const resolveUser = async (ctx: ToolContext, call: CallContext): Promise<UserContext> => {
+  try {
+    return userContextFrom(
+      call?.mcpReq?._meta,
+      ctx.httpCredentials,
+      ctx.allowEnvFallback === false ? null : fallbackCredentials(ctx)
+    );
+  } catch (err) {
+    if (!(err instanceof MissingCredentialsError) || !canSignIn(ctx, call)) throw err;
+    return signInForCall(ctx, call);
+  }
+};
+
+/**
+ * Whether a failure means this session is finished, rather than this request.
+ *
+ * A refused refresh token is always that. A 401 is too, but only when there was
+ * no refresh token to try — a 401 that survived a renewal is Hermes refusing a
+ * token it just minted, and signing in again would not change its answer.
+ */
+const sessionIsOver = (err: unknown, user: UserContext): boolean =>
+  err instanceof SessionExpiredError ||
+  (err instanceof HermesUnauthenticatedError && user.refreshToken === undefined);
+
+/**
+ * Runs one Hermes request for this call, from identity to answer.
+ *
+ * `prepare` receives the identity the call will act as and returns the send;
+ * it runs again after a fresh sign-in, so any check it makes against the
+ * identity (the store boundary above all) is made against the one actually
+ * used. A sign-in to a different store is refused, not silently redirected.
+ *
+ * Re-sending after a sign-in is safe even for a write: a session that is over
+ * was refused before Hermes acted on anything, so there is nothing to duplicate.
+ */
+export const callHermes = async (
+  ctx: ToolContext,
+  call: CallContext,
+  prepare: (user: UserContext) => (acting: UserContext) => Promise<unknown>,
+  onRenewal: (reason: RenewalReason) => void
+): Promise<unknown> => {
+  const user = await resolveUser(ctx, call);
+  try {
+    return await sendWithRenewal(ctx, user, prepare(user), onRenewal);
+  } catch (err) {
+    if (!sessionIsOver(err, user)) throw err;
+    forgetDeadSession(ctx, user);
+    if (!canSignIn(ctx, call)) throw err;
+
+    const fresh = await signInForCall(ctx, call);
+    return sendWithRenewal(ctx, fresh, prepare(fresh), onRenewal);
   }
 };
 
@@ -324,26 +508,22 @@ const wrap =
     try {
       const compiled = ctx.registry.get(toolName);
       const { path, query, body } = buildRequest(compiled, args);
-      const user = userContextFrom(
-        call?.mcpReq?._meta,
-        ctx.httpCredentials,
-        ctx.allowEnvFallback === false ? null : fallbackCredentials(ctx)
-      );
-      assertActingOnOwnStore(args, user);
 
-      ctx.logger.debug("tool call start", {
-        tool: toolName,
-        traceId,
-        method,
-        path,
-        query,
-        storeId: user.storeId,
-      });
-
-      const data = await sendWithRenewal(
+      const data = await callHermes(
         ctx,
-        user,
-        (acting) => ctx.createClient(acting).request(method, path, { query, body }),
+        call,
+        (user) => {
+          assertActingOnOwnStore(args, user);
+          ctx.logger.debug("tool call start", {
+            tool: toolName,
+            traceId,
+            method,
+            path,
+            query,
+            storeId: user.storeId,
+          });
+          return (acting) => ctx.createClient(acting).request(method, path, { query, body });
+        },
         (reason) => {
           // The reason, never the credential. `logging.ts` redacts token-shaped
           // keys, but the surest way not to log a secret is not to pass one.
@@ -356,7 +536,6 @@ const wrap =
       // undefined and make the result invalid against the MCP schema.
       return { content: [{ type: "text", text: JSON.stringify(data ?? null) }] };
     } catch (err) {
-      forgetDeadSession(ctx, err);
       ctx.logger.info("tool call failed", { tool: toolName, traceId, durationMs: Date.now() - start });
       return toToolResult(err, ctx.logger, toolName);
     }
@@ -469,9 +648,9 @@ export const registerHermesTools = (server: McpServer, ctx: ToolContext): SyncTo
   // Last, so the curated tools are listed first. A model reading tools/list
   // top-down meets the well-described, purpose-built tools before the
   // catch-all, which is the order we want it to prefer them in.
-  registerGatewayTools(server, ctx, { sendWithRenewal, assertStoreIds });
+  registerGatewayTools(server, ctx, { callHermes, assertStoreIds });
   // Only where a signed-in session means something. See ToolContext.auth.
-  if (ctx.auth !== undefined) registerSetupTool(server, ctx.auth);
+  if (ctx.auth !== undefined) registerSetupTool(server, ctx.auth, ctx.tokens);
 
   return syncToolSchemas;
 };

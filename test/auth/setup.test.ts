@@ -55,6 +55,8 @@ const connect = async (
           login: fakeLogin(),
           logger,
           pending: {},
+          // Never a real browser window from a test run.
+          openBrowser: async () => true,
         });
   if (auth) started.push(auth);
 

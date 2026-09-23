@@ -4,7 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { MissingOperationError, toToolResult } from "../errors.js";
 import { coerceQuery, substitutePath } from "../registry/operations.js";
 import { searchOperations } from "../registry/search.js";
-import { userContextFrom, type UserContext } from "../userContext.js";
+import type { UserContext } from "../userContext.js";
 // Types only, so this module does not sit in a runtime import cycle with
 // `index.ts`, which imports `registerGatewayTools` from here. The two runtime
 // helpers it needs arrive as `deps` instead.
@@ -18,10 +18,10 @@ import type { CallContext, ToolContext, ToolReturn } from "./index.js";
  * to reimplement for a second caller.
  */
 export interface GatewayDeps {
-  sendWithRenewal: (
+  callHermes: (
     ctx: ToolContext,
-    user: UserContext,
-    send: (acting: UserContext) => Promise<unknown>,
+    call: CallContext,
+    prepare: (user: UserContext) => (acting: UserContext) => Promise<unknown>,
     onRenewal: (reason: "expired" | "rejected") => void
   ) => Promise<unknown>;
   assertStoreIds: (candidates: unknown[], user: UserContext) => void;
@@ -263,42 +263,37 @@ export const registerGatewayTools = (
         const query = asRecord(args.query);
         const body = args.body;
 
-        const user = userContextFrom(
-          call?.mcpReq?._meta,
-          ctx.httpCredentials,
-          ctx.allowEnvFallback === false ? null : ctx.config.credentials
-        );
-
-        // Checked before the path is built, so a cross-tenant call costs nothing
-        // and reaches nothing.
-        deps.assertStoreIds(storeIdsNamedBy(args, template, pathParams, query, body), user);
-
         const path = substitutePath(template, pathParams);
         const resolvedQuery = coerceQuery(query);
 
-        if (method !== "get") {
-          // The one line that makes a destructive call greppable afterwards.
-          // Logged before the request, so an interrupted process still shows
-          // what it was about to do.
-          ctx.logger.warn("gateway write call", {
-            tool: "hermes_call_api",
-            traceId,
-            method,
-            // The template, never the substituted path. `logging.ts` redacts by
-            // key name, and a resolved path hides its values under the
-            // innocuous key "path" — so `DELETE /api/v1/customers/{token}`
-            // would write a live customer token into the logs, against hard
-            // constraint #4. The template names the operation, which is what an
-            // audit trail is for.
-            operation: template,
-            storeId: user.storeId,
-          });
-        }
-
-        const data = await deps.sendWithRenewal(
+        const data = await deps.callHermes(
           ctx,
-          user,
-          (acting) => ctx.createClient(acting).request(method, path, { query: resolvedQuery, body }),
+          call,
+          (user) => {
+            // Checked before anything is sent, and again after a fresh sign-in,
+            // so a cross-tenant call costs nothing and reaches nothing.
+            deps.assertStoreIds(storeIdsNamedBy(args, template, pathParams, query, body), user);
+
+            if (method !== "get") {
+              // The one line that makes a destructive call greppable afterwards.
+              // Logged before the request, so an interrupted process still shows
+              // what it was about to do.
+              ctx.logger.warn("gateway write call", {
+                tool: "hermes_call_api",
+                traceId,
+                method,
+                // The template, never the substituted path. `logging.ts` redacts by
+                // key name, and a resolved path hides its values under the
+                // innocuous key "path" — so `DELETE /api/v1/customers/{token}`
+                // would write a live customer token into the logs, against hard
+                // constraint #4. The template names the operation, which is what an
+                // audit trail is for.
+                operation: template,
+                storeId: user.storeId,
+              });
+            }
+            return (acting) => ctx.createClient(acting).request(method, path, { query: resolvedQuery, body });
+          },
           (reason) =>
             ctx.logger.info("renewed hermes session", { tool: "hermes_call_api", traceId, reason })
         );
