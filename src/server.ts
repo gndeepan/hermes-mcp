@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import { applyEnvFile } from "./envFile.js";
 import { loadConfig, type HermesMcpConfig } from "./config.js";
 import { createLogger, type Logger } from "./logging.js";
 import { registerHermesTools } from "./tools/index.js";
@@ -129,6 +130,19 @@ export const createServer = (
 
 /* c8 ignore start — process entry point, covered by running the binary */
 if (process.argv[1]?.endsWith("server.js")) {
-  serveStdio(() => createServer());
+  // Before anything reads the environment. A local single-user run keeps its
+  // credentials in a gitignored `.env`, and a client config can only forward
+  // variables that are already exported — so the file is read here or not at
+  // all. A shared run is untouched: see `applyEnvFile`.
+  const envFile = applyEnvFile();
+
+  serveStdio(() => {
+    const config = loadConfig();
+    const logger = createLogger(config);
+    // Named, never contents. "Which file did my credentials come from" is the
+    // first question asked when they turn out to be the wrong ones.
+    if (envFile !== null) logger.info("loaded env file", { path: envFile });
+    return createServer(config, logger);
+  });
 }
 /* c8 ignore stop */

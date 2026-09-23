@@ -5,7 +5,8 @@
       "command": "node",
       "args": ["dist/server.js"],
       "env": {
-        "HERMES_MCP_LOG_LEVEL": "debug"
+        "HERMES_MCP_LOG_LEVEL": "info",
+        "HERMES_SINGLE_USER": "1"
       }
     }
   }
