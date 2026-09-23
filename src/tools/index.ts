@@ -176,6 +176,13 @@ export const assertStoreIds = (candidates: unknown[], user: UserContext): void =
   for (const named of candidates) {
     if (named === undefined || named === null) continue;
 
+    // Fail closed. A store id that is an array or an object is not a store id
+    // this server can compare, and skipping it would let `storeId: ["str_x"]`
+    // through unchecked — the one outcome a tenant boundary must never have.
+    if (typeof named === "object") {
+      throw new StoreMismatchError(JSON.stringify(named), user.storeId);
+    }
+
     const asText = typeof named === "number" ? String(named) : named;
     if (typeof asText !== "string" || asText === "") continue;
     if (asText !== user.storeId) throw new StoreMismatchError(asText, user.storeId);

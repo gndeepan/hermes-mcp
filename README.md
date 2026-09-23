@@ -325,11 +325,20 @@ credentials and is safe to explore with. `hermes_call_api` goes through the same
 client as every curated tool, so it inherits credential resolution, session
 renewal, `X-Request-ID` propagation and error mapping unchanged.
 
-Two things bound it. The operation must exist in the loaded document — an
-unknown method and path is refused as `UNKNOWN_OPERATION` naming the near
-misses, and nothing is sent — and the store guard reads `storeId` wherever it
-appears, including inside `pathParams` and `body`, so a call can only ever act
-on the store it authenticated as.
+Two things bound it.
+
+The operation must exist in the loaded document — an unknown method and path is
+refused as `UNKNOWN_OPERATION` naming the near misses, and nothing is sent. A
+path parameter made only of dots is refused too: `..` survives URL-encoding and
+would resolve `/api/v1/stores/../info` onto `/api/v1/info`, an operation the
+document does not contain.
+
+And a call can only act on the store it authenticated as. The store is
+identified by position as well as by name, because Hermes does not spell it
+consistently: any placeholder sitting directly after a `stores` segment
+(`/api/v1/stores/{id}` as well as `{storeId}`), any path or query parameter
+named `storeId`, and any `storeId` anywhere in the body including inside
+arrays. A value that is not a scalar is refused rather than skipped.
 
 **`hermes_call_api` can modify and delete data.** `post`, `put` and `delete`
 take effect immediately, with the caller's own credentials, and this server

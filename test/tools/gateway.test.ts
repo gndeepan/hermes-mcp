@@ -15,15 +15,21 @@ const CREDENTIAL_META = { [ACCESS_TOKEN_KEY]: "tok", [STORE_ID_KEY]: "str_mine" 
 const textOf = (result: Awaited<ReturnType<Client["callTool"]>>): string =>
   (result.content as { text: string }[])[0]?.text ?? "";
 
-const connect = async (request: ReturnType<typeof vi.fn>): Promise<Client> => {
+const connect = async (
+  request: ReturnType<typeof vi.fn>,
+  options: { warn?: ReturnType<typeof vi.fn>; ctx?: Partial<ToolContext> } = {}
+): Promise<Client> => {
   const doc = loadSnapshotDoc();
   const registry = SchemaRegistry.fromDocument(doc);
+  const logger = createLogger({ logLevel: "silent" });
+  if (options.warn) logger.warn = options.warn as unknown as typeof logger.warn;
   const ctx: ToolContext = {
     config: loadConfig({}),
-    logger: createLogger({ logLevel: "silent" }),
+    logger,
     registry,
     createClient: () => ({ request }) as unknown as HermesRequester,
     specs: { registry, operations: OperationIndex.fromDocument(doc), doc },
+    ...options.ctx,
   };
   const server = new McpServer({ name: "test", version: "0.0.0" });
   registerHermesTools(server, ctx);
@@ -243,5 +249,291 @@ describe("gateway tool descriptions", () => {
     const client = await connect(vi.fn());
     const names = (await client.listTools()).tools.map((t) => t.name);
     expect(names.indexOf("hermes_get_active_theme")).toBeLessThan(names.indexOf("hermes_call_api"));
+  });
+});
+
+describe("hermes_call_api cross-tenant guard", () => {
+  // Hermes spells the store id `{id}` on 18 paths and `{storeId}` on 31, and
+  // takes it as a query parameter on 4 more. A guard that looks for the literal
+  // key "storeId" at depth 1 sees fewer than half of them.
+
+  it("refuses a foreign store named by an {id} placeholder under /stores", async () => {
+    const request = vi.fn();
+    const client = await connect(request);
+
+    const result = await client.callTool({
+      _meta: CREDENTIAL_META,
+      name: "hermes_call_api",
+      arguments: {
+        method: "get",
+        path: "/api/v1/stores/{id}/info",
+        pathParams: { id: "str_SOMEONE_ELSE" },
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(request).not.toHaveBeenCalled();
+    expect(textOf(result)).toContain("[STORE_MISMATCH]");
+  });
+
+  it("refuses a foreign store on a destructive operation", async () => {
+    const request = vi.fn();
+    const client = await connect(request);
+
+    const result = await client.callTool({
+      _meta: CREDENTIAL_META,
+      name: "hermes_call_api",
+      arguments: {
+        method: "delete",
+        path: "/api/v1/stores/{id}",
+        pathParams: { id: "str_SOMEONE_ELSE" },
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(request).not.toHaveBeenCalled();
+    expect(textOf(result)).toContain("[STORE_MISMATCH]");
+  });
+
+  it("refuses a foreign store id passed as a query parameter", async () => {
+    const request = vi.fn();
+    const client = await connect(request);
+
+    const result = await client.callTool({
+      _meta: CREDENTIAL_META,
+      name: "hermes_call_api",
+      arguments: {
+        method: "get",
+        path: "/api/v1/themes/active",
+        query: { storeId: "str_SOMEONE_ELSE" },
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(request).not.toHaveBeenCalled();
+    expect(textOf(result)).toContain("[STORE_MISMATCH]");
+  });
+
+  it("refuses a foreign store id nested inside the body", async () => {
+    const request = vi.fn();
+    const client = await connect(request);
+
+    const result = await client.callTool({
+      _meta: CREDENTIAL_META,
+      name: "hermes_call_api",
+      arguments: {
+        method: "put",
+        path: "/api/v1/users/{id}",
+        pathParams: { id: "usr_1" },
+        body: { store: { storeId: "str_SOMEONE_ELSE" } },
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(request).not.toHaveBeenCalled();
+    expect(textOf(result)).toContain("[STORE_MISMATCH]");
+  });
+
+  it("refuses a foreign store id inside an array body", async () => {
+    const request = vi.fn();
+    const client = await connect(request);
+
+    const result = await client.callTool({
+      _meta: CREDENTIAL_META,
+      name: "hermes_call_api",
+      arguments: {
+        method: "put",
+        path: "/api/v1/store-switchers",
+        body: [{ storeId: "str_SOMEONE_ELSE" }],
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(request).not.toHaveBeenCalled();
+    expect(textOf(result)).toContain("[STORE_MISMATCH]");
+  });
+
+  it("fails closed on a storeId that is not a scalar", async () => {
+    const request = vi.fn();
+    const client = await connect(request);
+
+    const result = await client.callTool({
+      _meta: CREDENTIAL_META,
+      name: "hermes_call_api",
+      arguments: {
+        method: "put",
+        path: "/api/v1/users/{id}",
+        pathParams: { id: "usr_1" },
+        body: { storeId: ["str_SOMEONE_ELSE"] },
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(request).not.toHaveBeenCalled();
+    expect(textOf(result)).toContain("[STORE_MISMATCH]");
+  });
+
+  it("still allows the caller's own store under any spelling", async () => {
+    const request = vi.fn(async () => ({ ok: true }));
+    const client = await connect(request);
+
+    const result = await client.callTool({
+      _meta: CREDENTIAL_META,
+      name: "hermes_call_api",
+      arguments: { method: "get", path: "/api/v1/stores/{id}/info", pathParams: { id: "str_mine" } },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(request).toHaveBeenCalledWith("get", "/api/v1/stores/str_mine/info", {
+      query: {},
+      body: undefined,
+    });
+  });
+});
+
+describe("hermes_call_api path escape", () => {
+  // encodeURIComponent("..") is "..", and new URL(path, base) then applies
+  // RFC-3986 dot-segment removal — so /api/v1/stores/../info is requested as
+  // /api/v1/info, an operation the document does not contain. The curated path
+  // has guarded this since before the gateway existed.
+
+  it("refuses a dot-only path parameter", async () => {
+    const request = vi.fn();
+    const client = await connect(request);
+
+    const result = await client.callTool({
+      _meta: CREDENTIAL_META,
+      name: "hermes_call_api",
+      // A non-store path, so the dot-segment guard is what is under test here
+      // rather than the store guard, which also refuses ".." on a store path.
+      arguments: { method: "get", path: "/api/v1/users/{id}", pathParams: { id: ".." } },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(request).not.toHaveBeenCalled();
+    expect(textOf(result)).toContain("[INVALID_PATH_PARAM]");
+  });
+
+  it("refuses a single-dot path parameter", async () => {
+    const request = vi.fn();
+    const client = await connect(request);
+
+    const result = await client.callTool({
+      _meta: CREDENTIAL_META,
+      name: "hermes_call_api",
+      arguments: { method: "get", path: "/api/v1/users/{id}", pathParams: { id: "." } },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(request).not.toHaveBeenCalled();
+    expect(textOf(result)).toContain("[INVALID_PATH_PARAM]");
+  });
+
+  it("still allows a dot inside a real identifier", async () => {
+    const request = vi.fn(async () => ({}));
+    const client = await connect(request);
+
+    await client.callTool({
+      _meta: CREDENTIAL_META,
+      name: "hermes_call_api",
+      arguments: { method: "get", path: "/api/v1/users/{id}", pathParams: { id: "a.b.c" } },
+    });
+
+    expect(request).toHaveBeenCalledWith("get", "/api/v1/users/a.b.c", {
+      query: {},
+      body: undefined,
+    });
+  });
+});
+
+describe("hermes_call_api audit trail", () => {
+  it("logs every non-GET call at warn, naming the method and the operation", async () => {
+    // The entire stated mitigation for any-method access. Nothing pinned it, so
+    // deleting the log line kept the suite green.
+    const warn = vi.fn();
+    const client = await connect(vi.fn(async () => ({})), { warn });
+
+    await client.callTool({
+      _meta: CREDENTIAL_META,
+      name: "hermes_call_api",
+      arguments: { method: "put", path: "/api/v1/users/{id}", pathParams: { id: "usr_1" } },
+    });
+
+    const line = warn.mock.calls.find((c) => c[0] === "gateway write call");
+    expect(line).toBeDefined();
+    expect(line![1]).toMatchObject({ method: "put", operation: "/api/v1/users/{id}" });
+  });
+
+  it("does not log a GET as a write", async () => {
+    const warn = vi.fn();
+    const client = await connect(vi.fn(async () => ({})), { warn });
+
+    await client.callTool({
+      _meta: CREDENTIAL_META,
+      name: "hermes_call_api",
+      arguments: { method: "get", path: "/api/v1/themes/active" },
+    });
+
+    expect(warn.mock.calls.find((c) => c[0] === "gateway write call")).toBeUndefined();
+  });
+
+  it("never puts a substituted path value in the audit line", async () => {
+    // DELETE /api/v1/customers/{token} is a real operation, and logging.ts
+    // redacts by key name — so a resolved path would carry the secret verbatim
+    // under the innocuous key "path", against hard constraint #4.
+    const warn = vi.fn();
+    const client = await connect(vi.fn(async () => ({})), { warn });
+
+    await client.callTool({
+      _meta: CREDENTIAL_META,
+      name: "hermes_call_api",
+      arguments: {
+        method: "put",
+        path: "/api/v1/users/{id}",
+        pathParams: { id: "SUPERSECRETVALUE" },
+      },
+    });
+
+    const line = warn.mock.calls.find((c) => c[0] === "gateway write call");
+    expect(JSON.stringify(line)).not.toContain("SUPERSECRETVALUE");
+  });
+});
+
+describe("hermes_call_api credential sources", () => {
+  it("uses HTTP credentials when the request carried them", async () => {
+    const request = vi.fn(async () => ({}));
+    const client = await connect(request, {
+      ctx: {
+        httpCredentials: { accessToken: "http-tok", storeId: "str_http" },
+        allowEnvFallback: false,
+      },
+    });
+
+    const result = await client.callTool({
+      name: "hermes_call_api",
+      arguments: { method: "get", path: "/api/v1/stores/{id}/info", pathParams: { id: "str_http" } },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(request).toHaveBeenCalled();
+  });
+
+  it("refuses to fall back to the environment when the entry forbids it", async () => {
+    const request = vi.fn();
+    const client = await connect(request, {
+      ctx: {
+        allowEnvFallback: false,
+        config: { ...loadConfig({}), credentials: { accessToken: "env", storeId: "str_env" } },
+      },
+    });
+
+    const result = await client.callTool({
+      name: "hermes_call_api",
+      arguments: { method: "get", path: "/api/v1/themes/active" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(request).not.toHaveBeenCalled();
+    expect(textOf(result)).toContain("[MISSING_CREDENTIALS]");
   });
 });

@@ -107,6 +107,23 @@ export class OperationIndex {
 const PLACEHOLDER = /\{([^}]+)\}/g;
 
 /**
+ * A value made only of dots survives `encodeURIComponent` untouched — `".."`
+ * encodes to `".."` — and `new URL(path, base)` in `HermesClient` then applies
+ * RFC-3986 dot-segment removal. So `{id}` of `".."` turns
+ * `/api/v1/stores/{id}/info` into a request for `/api/v1/info`: an operation
+ * that is not in the document, reached after the check that the operation is in
+ * the document already passed.
+ *
+ * `src/tools/index.ts` has guarded the curated path against exactly this since
+ * before the gateway existed. Dots are legal inside real Hermes ids, so only a
+ * value consisting *entirely* of dots is refused.
+ */
+const DOT_ONLY = /^\.+$/;
+
+/** The backstop, applied to whatever substitution actually produced. */
+const DOT_ONLY_SEGMENT = /(^|\/)\.+(\/|$)/;
+
+/**
  * Fills a path template from caller-supplied values.
  *
  * Every value is percent-encoded, without exception. A path parameter is the
@@ -115,8 +132,8 @@ const PLACEHOLDER = /\{([^}]+)\}/g;
  * wrong argument — it would be a different request, to an endpoint nobody
  * chose. Encoding turns it back into what it was meant to be: one segment.
  */
-export const substitutePath = (template: string, params: Record<string, unknown>): string =>
-  template.replace(PLACEHOLDER, (_match, name: string) => {
+export const substitutePath = (template: string, params: Record<string, unknown>): string => {
+  const path = template.replace(PLACEHOLDER, (_match, name: string) => {
     const raw = params[name];
     if (raw === undefined || raw === null) {
       throw new InvalidPathParameterError(template, `no value given for {${name}}`);
@@ -131,8 +148,26 @@ export const substitutePath = (template: string, params: Record<string, unknown>
     if (text === "") {
       throw new InvalidPathParameterError(template, `{${name}} was given an empty value`);
     }
+    if (DOT_ONLY.test(text)) {
+      throw new InvalidPathParameterError(
+        template,
+        `{${name}} was given "${text}", which would resolve onto a different path entirely`
+      );
+    }
     return encodeURIComponent(text);
   });
+
+  // The per-parameter check above names the offending argument, which is the
+  // more useful message; this holds whatever the substitution produced,
+  // including a dot segment that was already in the template.
+  if (DOT_ONLY_SEGMENT.test(path)) {
+    throw new InvalidPathParameterError(
+      template,
+      "the resulting path contains a dot-only segment, which would resolve onto a different operation"
+    );
+  }
+  return path;
+};
 
 /**
  * Narrows caller-supplied query values to the strings the transport takes.

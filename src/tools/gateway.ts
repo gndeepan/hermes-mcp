@@ -102,6 +102,76 @@ const asRecord = (value: unknown): Record<string, unknown> =>
     ? (value as Record<string, unknown>)
     : {};
 
+/**
+ * Every value in this call that claims to name a store.
+ *
+ * The first version of this looked for the literal key `storeId` in three
+ * places. That is not how Hermes spells it: the store is `{id}` on 18 paths
+ * (`/api/v1/stores/{id}/info`, `/api/v1/stores/{id}/firebase/service-account`,
+ * `DELETE /api/v1/stores/{id}`), `{storeId}` on 31 more, and a query parameter
+ * on 4. A name-matching guard saw fewer than half of them and let the rest
+ * through — authorised by the caller's own token, and so answering with another
+ * merchant's data rather than an error.
+ *
+ * So the store is identified by *position* as well as by name:
+ *
+ * - any path placeholder sitting directly after a `stores` segment, whatever it
+ *   is called — this is what makes `/api/v1/stores/{id}` safe;
+ * - any path or query parameter named `storeId`, however it is cased;
+ * - any `storeId` anywhere in the body, at any depth, including inside arrays,
+ *   because `PUT /api/v1/store-switchers` takes a top-level array of them.
+ *
+ * Over-collecting is safe here and under-collecting is not: every candidate is
+ * compared against the authenticated store, and a value that legitimately
+ * equals it passes.
+ */
+const STORE_KEY = /^storeid$/i;
+
+const placeholderStoreIds = (
+  template: string,
+  pathParams: Record<string, unknown>
+): unknown[] => {
+  const segments = template.split("/").filter(Boolean);
+  const found: unknown[] = [];
+
+  segments.forEach((segment, i) => {
+    if (!segment.startsWith("{") || !segment.endsWith("}")) return;
+    const name = segment.slice(1, -1);
+    const previous = segments[i - 1]?.toLowerCase();
+    if (previous === "stores" || previous === "store" || STORE_KEY.test(name)) {
+      found.push(pathParams[name]);
+    }
+  });
+
+  return found;
+};
+
+/** Every `storeId` in a JSON value, at any depth, arrays included. */
+const bodyStoreIds = (value: unknown, depth = 0): unknown[] => {
+  // Hermes bodies are shallow; the cap only stops a pathological payload from
+  // costing more to check than to send.
+  if (depth > 6 || value === null || typeof value !== "object") return [];
+  if (Array.isArray(value)) return value.flatMap((item) => bodyStoreIds(item, depth + 1));
+
+  return Object.entries(value as Record<string, unknown>).flatMap(([key, child]) =>
+    STORE_KEY.test(key) ? [child] : bodyStoreIds(child, depth + 1)
+  );
+};
+
+const storeIdsNamedBy = (
+  args: Record<string, unknown>,
+  template: string,
+  pathParams: Record<string, unknown>,
+  query: Record<string, unknown>,
+  body: unknown
+): unknown[] => [
+  args.storeId,
+  ...placeholderStoreIds(template, pathParams),
+  ...Object.entries(pathParams).filter(([k]) => STORE_KEY.test(k)).map(([, v]) => v),
+  ...Object.entries(query).filter(([k]) => STORE_KEY.test(k)).map(([, v]) => v),
+  ...bodyStoreIds(body),
+];
+
 export const registerGatewayTools = (
   server: McpServer,
   ctx: ToolContext,
@@ -199,10 +269,9 @@ export const registerGatewayTools = (
           ctx.allowEnvFallback === false ? null : ctx.config.credentials
         );
 
-        // Three places a store id can hide in a gateway call, against one in a
-        // curated one. Checked before the path is built, so a cross-tenant call
-        // costs nothing and reaches nothing.
-        deps.assertStoreIds([args.storeId, pathParams.storeId, asRecord(body).storeId], user);
+        // Checked before the path is built, so a cross-tenant call costs nothing
+        // and reaches nothing.
+        deps.assertStoreIds(storeIdsNamedBy(args, template, pathParams, query, body), user);
 
         const path = substitutePath(template, pathParams);
         const resolvedQuery = coerceQuery(query);
@@ -215,7 +284,13 @@ export const registerGatewayTools = (
             tool: "hermes_call_api",
             traceId,
             method,
-            path,
+            // The template, never the substituted path. `logging.ts` redacts by
+            // key name, and a resolved path hides its values under the
+            // innocuous key "path" — so `DELETE /api/v1/customers/{token}`
+            // would write a live customer token into the logs, against hard
+            // constraint #4. The template names the operation, which is what an
+            // audit trail is for.
+            operation: template,
             storeId: user.storeId,
           });
         }
