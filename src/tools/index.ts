@@ -7,11 +7,13 @@ import type { SchemaRegistry } from "../registry/schemaRegistry.js";
 import type { CompiledEndpoint } from "../registry/schemaFromOpenApi.js";
 import { ENDPOINTS } from "../registry/endpoints.js";
 import { registerGatewayTools } from "./gateway.js";
+import { registerSetupTool, type AuthContext } from "./setup.js";
 import { OperationIndex } from "../registry/operations.js";
 import type { HermesRequester } from "../hermesClient.js";
-import { userContextFrom, type HttpCredentials, type UserContext } from "../userContext.js";
+import { userContextFrom, type EnvCredentials, type HttpCredentials, type UserContext } from "../userContext.js";
 import { fetchOpenApiDoc, type PrimeTarget } from "../openapiSync.js";
 import { isStale, type SessionTokens, type TokenCache } from "../tokenRefresh.js";
+import { SessionExpiredError } from "../errors.js";
 import {
   HermesUnauthenticatedError,
   InvalidPathParameterError,
@@ -61,6 +63,14 @@ export interface ToolContext {
    * what makes the manual refresh mean anything to the gateway.
    */
   specs: PrimeTarget;
+  /**
+   * The signed-in session on disk, when this process owns one.
+   *
+   * Present only for a single-user stdio run. Its absence is what keeps
+   * `hermes_setup` off the shared HTTP service and out of the ai-agent's shared
+   * child process, where "the" signed-in user does not exist.
+   */
+  auth?: AuthContext;
 }
 
 /**
@@ -192,6 +202,38 @@ export const assertStoreIds = (candidates: unknown[], user: UserContext): void =
 const assertActingOnOwnStore = (args: Record<string, unknown>, user: UserContext): void =>
   assertStoreIds([args.storeId], user);
 
+/**
+ * The single-user identity to fall back on, from whichever source has one.
+ *
+ * `.env` wins over the stored session on purpose: a developer who exports a
+ * token, or writes one into `.env`, is stating an intent for this run, and a
+ * file written weeks ago by `hermes_setup` should not quietly override it.
+ */
+export const fallbackCredentials = (ctx: ToolContext): EnvCredentials | null => {
+  if (ctx.config.credentials !== null) return ctx.config.credentials;
+
+  const stored = ctx.auth?.store.read();
+  if (!stored) return null;
+  return {
+    accessToken: stored.accessToken,
+    storeId: stored.storeId,
+    refreshToken: stored.refreshToken,
+    expiresAt: stored.expiresAt,
+  };
+};
+
+/**
+ * Forgets a session Hermes has just declared dead.
+ *
+ * Without this the server would keep presenting a credential it knows is
+ * finished, failing every call the same way forever, and `hermes_setup` would
+ * keep reporting the merchant as signed in. Clearing turns a permanent failure
+ * into the one thing that fixes it: a prompt to sign in again.
+ */
+const forgetDeadSession = (ctx: ToolContext, err: unknown): void => {
+  if (err instanceof SessionExpiredError) ctx.auth?.store.clear();
+};
+
 /** How a renewal came to happen, for the log line. Never the tokens themselves. */
 type RenewalReason = "expired" | "rejected";
 
@@ -285,7 +327,7 @@ const wrap =
       const user = userContextFrom(
         call?.mcpReq?._meta,
         ctx.httpCredentials,
-        ctx.allowEnvFallback === false ? null : ctx.config.credentials
+        ctx.allowEnvFallback === false ? null : fallbackCredentials(ctx)
       );
       assertActingOnOwnStore(args, user);
 
@@ -314,6 +356,7 @@ const wrap =
       // undefined and make the result invalid against the MCP schema.
       return { content: [{ type: "text", text: JSON.stringify(data ?? null) }] };
     } catch (err) {
+      forgetDeadSession(ctx, err);
       ctx.logger.info("tool call failed", { tool: toolName, traceId, durationMs: Date.now() - start });
       return toToolResult(err, ctx.logger, toolName);
     }
@@ -427,6 +470,8 @@ export const registerHermesTools = (server: McpServer, ctx: ToolContext): SyncTo
   // top-down meets the well-described, purpose-built tools before the
   // catch-all, which is the order we want it to prefer them in.
   registerGatewayTools(server, ctx, { sendWithRenewal, assertStoreIds });
+  // Only where a signed-in session means something. See ToolContext.auth.
+  if (ctx.auth !== undefined) registerSetupTool(server, ctx.auth);
 
   return syncToolSchemas;
 };

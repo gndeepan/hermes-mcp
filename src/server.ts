@@ -7,6 +7,9 @@ import { createLogger, type Logger } from "./logging.js";
 import { registerHermesTools } from "./tools/index.js";
 import { SchemaRegistry } from "./registry/schemaRegistry.js";
 import { OperationIndex } from "./registry/operations.js";
+import { CredentialStore } from "./auth/credentialStore.js";
+import { HttpHermesLogin } from "./auth/hermesLogin.js";
+import type { AuthContext } from "./tools/setup.js";
 import { loadSnapshotDoc } from "./registry/snapshot.js";
 import { ENDPOINTS } from "./registry/endpoints.js";
 import { primeRegistry } from "./openapiSync.js";
@@ -76,6 +79,15 @@ export interface ServerOptions {
   /** Credentials from the HTTP request being served. Absent under stdio. */
   httpCredentials?: HttpCredentials;
   /**
+   * The signed-in session this process owns, enabling `hermes_setup`.
+   *
+   * Passed only by the stdio entry, and only in single-user mode. The HTTP
+   * entry never constructs one, which is what keeps hard constraint #2 intact
+   * everywhere it still applies: a shared process cannot read or write a
+   * credential file it has no handle to.
+   */
+  auth?: AuthContext;
+  /**
    * Whether a call carrying no credentials may fall back to the environment.
    *
    * Defaults to true, which is right for stdio: one process serves one user,
@@ -114,6 +126,7 @@ export const buildServer = (
     ...(options.httpCredentials === undefined
       ? {}
       : { httpCredentials: options.httpCredentials }),
+    ...(options.auth === undefined ? {} : { auth: options.auth }),
     allowEnvFallback: options.allowEnvFallback ?? true,
   });
 
@@ -142,7 +155,20 @@ export const createServer = (
 
   // Order matters: the tools must be registered before the refresh loop starts,
   // so the loop has a sync function to push refreshed schemas through.
-  const { server, syncToolSchemas } = buildServer(runtime, { allowEnvFallback: config.singleUser });
+  // The login subsystem exists only where one signed-in user is the truth.
+  const auth: AuthContext | undefined = config.singleUser
+    ? {
+        store: new CredentialStore(),
+        login: new HttpHermesLogin(config.hermesBaseUrl),
+        logger,
+        pending: {},
+      }
+    : undefined;
+
+  const { server, syncToolSchemas } = buildServer(runtime, {
+    allowEnvFallback: config.singleUser,
+    ...(auth === undefined ? {} : { auth }),
+  });
 
   void primeRegistry(runtime, config, logger, () => {
     const changed = syncToolSchemas();

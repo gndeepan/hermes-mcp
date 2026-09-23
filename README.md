@@ -87,6 +87,44 @@ npm start         # node dist/server.js -- speaks MCP over stdio
 npm run start:http
 ```
 
+## Signing in
+
+For a single-user run (`HERMES_SINGLE_USER=1`), the server can sign you in
+itself — no copying tokens out of localStorage.
+
+Ask your assistant to call **`hermes_setup`**. If you already have a live
+session it says who you are and moves on. If not, it starts a web server on
+`127.0.0.1`, opens your browser, and returns straight away:
+
+```
+No Hermes session found.
+Opened your browser to:
+http://127.0.0.1:59711/?k=wdNNeskUDmI6FQmMecTk0T-VRYX3clrX
+```
+
+In that tab: your email, the code emailed to you, and which store to act on
+(skipped when there is only one). Then it says you are signed in, **and the
+server shuts itself down** — it exists for the login and no longer.
+
+The session is written to `~/.hermes-mcp/credentials.json`, readable only by
+you (`0600`, or an owner-only ACL on Windows). From then on the access token is
+refreshed before it expires, without anyone being asked. If the refresh token
+itself dies — leave it a day or two — the stored session is discarded and every
+tool answers `[SESSION_EXPIRED]`, naming `hermes_setup` as the remedy.
+
+Two properties worth knowing:
+
+- **Tokens never enter the browser.** The page collects an email and a code; the
+  MCP process talks to Hermes and keeps the result. Nothing sensitive goes in a
+  URL, so nothing leaks through history or a referer.
+- **The login page is not reachable by anything else on your machine.** It binds
+  loopback only, and every request must carry a single-use key from the opening
+  URL. Anything else gets a `403` with no body.
+
+`hermes_setup` only exists where one signed-in user is meaningful. The shared
+HTTP service never builds a credential store at all, and a shared stdio process
+does not advertise the tool.
+
 ## Authentication
 
 There is no login, no browser flow and no credential file. The client sends the
@@ -279,6 +317,7 @@ Verify with `claude mcp list` and `claude mcp get hermes-mcp`.
 | `hermes_get_widget` | `GET /api/v1/widgets/{id}` |
 | `hermes_update_widget` | `PUT /api/v1/widgets/{id}` |
 | `hermes_refresh_openapi` | — (recompiles the schemas above from the live spec) |
+| `hermes_setup` | — (signs in; see Signing in) |
 | `hermes_find_api` | — (searches the spec; calls nothing) |
 | `hermes_call_api` | any operation in the spec, by method and path |
 
@@ -527,8 +566,12 @@ reads at startup was left out of `files`.
 ## Hard constraints
 
 1. Never write to stdout under `src/` — stdout is the MCP transport.
-2. Never persist a credential. Credentials arrive per call and live only for
-   the duration of that call.
+2. Never persist a credential **except for a single-user stdio run**. Narrowed,
+   deliberately, when `hermes_setup` was added: signing in once and staying
+   signed in is the entire feature, and it cannot be done without writing a
+   refresh token to disk. The rule still holds everywhere it protects anything —
+   the HTTP entry never constructs a `CredentialStore`, and a shared stdio
+   process never reads one. Credentials still arrive per call in `_meta` there.
 3. ~~Never expose a Hermes operation that isn't a named entry in
    `src/registry/endpoints.ts`.~~ **Withdrawn**, deliberately, when
    `hermes_call_api` was added: every operation in Hermes's OpenAPI document is

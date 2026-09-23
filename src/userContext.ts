@@ -98,6 +98,16 @@ export interface EnvCredentials {
   accessToken: string;
   storeId: string;
   refreshToken?: string;
+  /**
+   * When the access token dies, in epoch milliseconds.
+   *
+   * The environment never knows this — a token pasted into `.env` carries no
+   * expiry — but a session restored from `hermes_setup` does, and without it a
+   * stored session could only be renewed *after* a call had already failed.
+   * Optional for exactly that reason: present for a signed-in session, absent
+   * for a pasted token.
+   */
+  expiresAt?: number;
 }
 
 /**
@@ -191,7 +201,7 @@ export const userContextFrom = (
   // asserted for itself would hand this call a different user's credential.
   const renewal = callAsserts
     ? renewalFrom(readMeta(meta, REFRESH_TOKEN_KEY, "refreshToken"), readMeta(meta, EXPIRES_AT_KEY, "expiresAt"))
-    : renewalFrom(fallback?.refreshToken, undefined);
+    : renewalFrom(fallback?.refreshToken, fallback?.expiresAt);
 
   return { accessToken, storeId, ...(requestId ? { requestId } : {}), ...renewal };
 };
