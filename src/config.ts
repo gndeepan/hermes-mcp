@@ -81,7 +81,7 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): HermesMcpConfi
   return {
     logLevel: (rawLogLevel as LogLevel | undefined) ?? "info",
     serverName: "hermes-mcp",
-    serverVersion: "0.1.0",
+    serverVersion: "0.2.0",
     hermesBaseUrl: env.HERMES_BASE_URL ?? "https://hermes-atlas.vjr-dev.com",
     openApiDocsUrl: env.HERMES_OPENAPI_DOCS_URL ?? "https://hermes-atlas.vjr-dev.com/v3/api-docs",
     openApiFetchTimeoutMs: 10_000,
