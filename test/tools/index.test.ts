@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { registerHermesTools, type ToolContext } from "../../src/tools/index.js";
 import { SchemaRegistry } from "../../src/registry/schemaRegistry.js";
+import { OperationIndex } from "../../src/registry/operations.js";
 import { loadSnapshotDoc } from "../../src/registry/snapshot.js";
 import { ENDPOINTS } from "../../src/registry/endpoints.js";
 import { createLogger } from "../../src/logging.js";
@@ -41,13 +42,18 @@ const buildServerAndClient = async (ctx: ToolContext): Promise<Client> => {
   return client;
 };
 
-const baseCtx = (overrides: Partial<ToolContext> = {}): ToolContext => ({
-  config: loadConfig({}),
-  logger: createLogger({ logLevel: "silent" }),
-  registry: SchemaRegistry.fromDocument(loadSnapshotDoc()),
-  createClient: () => ({ request: vi.fn() }) as HermesRequester,
-  ...overrides,
-});
+const baseCtx = (overrides: Partial<ToolContext> = {}): ToolContext => {
+  const doc = loadSnapshotDoc();
+  const registry = SchemaRegistry.fromDocument(doc);
+  return {
+    config: loadConfig({}),
+    logger: createLogger({ logLevel: "silent" }),
+    registry,
+    createClient: () => ({ request: vi.fn() }) as HermesRequester,
+    specs: { registry, operations: OperationIndex.fromDocument(doc), doc },
+    ...overrides,
+  };
+};
 
 const textOf = (result: Awaited<ReturnType<Client["callTool"]>>): string =>
   (result.content as { text: string }[])[0]?.text ?? "";
@@ -86,7 +92,12 @@ describe("registerHermesTools", () => {
     const client = await buildServerAndClient(baseCtx());
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(
-      [...ENDPOINTS.map((e) => e.toolName), "hermes_refresh_openapi"].sort()
+      [
+        ...ENDPOINTS.map((e) => e.toolName),
+        "hermes_refresh_openapi",
+        "hermes_find_api",
+        "hermes_call_api",
+      ].sort()
     );
   });
 
@@ -686,7 +697,11 @@ describe("when Hermes changes its API", () => {
       const { tools } = await client.listTools();
       const names = tools.map((tool) => tool.name);
 
-      expect(names).toHaveLength(ENDPOINTS.length + 1); // + hermes_refresh_openapi
+      // + hermes_refresh_openapi, hermes_find_api, hermes_call_api
+      expect(names).toHaveLength(ENDPOINTS.length + 3);
+      // A newly published operation must not become a tool of its own. It is
+      // reachable through hermes_call_api, which is a deliberate decision, not
+      // an accident of the allowlist growing on its own.
       expect(names).not.toContain("hermes_list_discounts");
     });
   });

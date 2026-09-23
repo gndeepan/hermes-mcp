@@ -20,7 +20,7 @@ import { createMcpHandler } from "@modelcontextprotocol/server";
 import { loadConfig } from "./config.js";
 import { createLogger } from "./logging.js";
 import { ENDPOINTS } from "./registry/endpoints.js";
-import { startOpenApiRefreshLoop } from "./openapiSync.js";
+import { primeRegistry } from "./openapiSync.js";
 import { buildServer, createRuntime, type ServerRuntime } from "./server.js";
 import { toEpochMillis } from "./tokenRefresh.js";
 import type { HttpCredentials } from "./userContext.js";
@@ -113,10 +113,7 @@ if (process.argv[1]?.endsWith("httpServer.js")) {
 
   // Hoisted out of the per-request factory on purpose. Inside it, every request
   // would start its own timer and its own outbound spec fetch.
-  startOpenApiRefreshLoop(runtime.registry, config, logger, () => {
-    // Nothing to re-advertise: each request builds a server that reads the
-    // current registry, so a refreshed schema is live on the very next call.
-  });
+  void primeRegistry(runtime, config, logger);
 
   const handler = createHandler({ runtime });
   const port = Number(process.env.PORT ?? 8787);

@@ -39,7 +39,12 @@ describe("tools/list", () => {
   it("advertises every allowlisted tool plus hermes_refresh_openapi, each with a description and schema", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(
-      [...ENDPOINTS.map((e) => e.toolName), "hermes_refresh_openapi"].sort()
+      [
+        ...ENDPOINTS.map((e) => e.toolName),
+        "hermes_refresh_openapi",
+        "hermes_find_api",
+        "hermes_call_api",
+      ].sort()
     );
     for (const tool of tools) {
       // A description is the only thing a model sees before picking a tool, so
@@ -136,5 +141,52 @@ describe("stdout discipline", () => {
     expect(STDOUT_WRITERS.test("console.error('x')")).toBe(false);
     expect(STDOUT_WRITERS.test("console.warn('x')")).toBe(false);
     expect(STDOUT_WRITERS.test("process.stderr.write('x')")).toBe(false);
+  });
+});
+
+describe("the API gateway", () => {
+  it("advertises both gateway tools with usable descriptions", async () => {
+    const client = await connect("gateway-descriptions");
+    const { tools } = await client.listTools();
+
+    const find = tools.find((t) => t.name === "hermes_find_api");
+    const call = tools.find((t) => t.name === "hermes_call_api");
+    expect(find).toBeDefined();
+    expect(call).toBeDefined();
+    expect(find!.description!.length).toBeGreaterThanOrEqual(120);
+    expect(call!.description!.length).toBeGreaterThanOrEqual(120);
+    // The destructive warning is the one line that must survive any edit: it is
+    // the only thing telling a client to ask a human before a delete.
+    expect(call!.description).toMatch(/MODIFY AND DELETE/);
+  });
+
+  it("lists the curated tools before the gateway", async () => {
+    const client = await connect("gateway-order");
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names.indexOf("hermes_get_active_theme")).toBeLessThan(names.indexOf("hermes_call_api"));
+    expect(names.indexOf("hermes_update_widget")).toBeLessThan(names.indexOf("hermes_find_api"));
+  });
+
+  it("searches without credentials, because searching reaches nothing", async () => {
+    const client = await connect("gateway-search");
+    const result = await client.callTool({
+      name: "hermes_find_api",
+      arguments: { query: "user" },
+    });
+    expect(result.isError).toBeFalsy();
+    const payload = JSON.parse((result.content as { text: string }[])[0].text) as {
+      candidates: unknown[];
+    };
+    expect(payload.candidates.length).toBeGreaterThan(0);
+  });
+
+  it("refuses a gateway call with no credentials before reaching the network", async () => {
+    const client = await connect("gateway-credentials");
+    const result = await client.callTool({
+      name: "hermes_call_api",
+      arguments: { method: "get", path: "/api/v1/themes/active" },
+    });
+    expect(result.isError).toBe(true);
+    expect((result.content as { text: string }[])[0].text).toContain("[MISSING_CREDENTIALS]");
   });
 });

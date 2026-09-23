@@ -12,6 +12,14 @@
         "HERMES_BASE_URL": "${HERMES_BASE_URL:-https://hermes-atlas.vjr-dev.com}",
         "HERMES_OPENAPI_DOCS_URL": "${HERMES_OPENAPI_DOCS_URL:-https://hermes-atlas.vjr-dev.com/v3/api-docs}"
       }
+    },
+    "hermes-mcp-local": {
+      "command": "node",
+      "args": ["dist/server.js"],
+      "env": {
+        "HERMES_MCP_LOG_LEVEL": "info",
+        "HERMES_SINGLE_USER": "1"
+      }
     }
   }
 }
