@@ -145,6 +145,8 @@ export class TokenCache {
   readonly #inFlight = new Map<string, Promise<SessionTokens>>();
   readonly #maxEntries: number;
   readonly #timeoutMs: number;
+  /** Bumped by `clear`, so a renewal started before a logout is not stored after it. */
+  #generation = 0;
 
   constructor(
     private readonly baseUrl: string,
@@ -180,10 +182,11 @@ export class TokenCache {
     const flight = this.#inFlight.get(key);
     if (flight !== undefined) return flight;
 
+    const generation = this.#generation;
     const started = (async () => {
       try {
         const tokens = await refreshAccessToken(this.baseUrl, refreshToken, this.#timeoutMs);
-        this.#remember(key, tokens);
+        if (generation === this.#generation) this.#remember(key, tokens);
         return tokens;
       } finally {
         // Always, including on failure: a failed renewal must not be cached as
@@ -194,6 +197,19 @@ export class TokenCache {
 
     this.#inFlight.set(key, started);
     return started;
+  }
+
+  /**
+   * Forgets every renewed token, for `hermes_logout`.
+   *
+   * Renewals in flight are left to finish: they are shared promises other
+   * calls may be awaiting, and each removes itself from the map when done. The
+   * tokens they produce are simply never remembered: each renewal notes the
+   * generation it started in, and a `clear` since then means it stores nothing.
+   */
+  clear(): void {
+    this.#entries.clear();
+    this.#generation += 1;
   }
 
   /** Entries held, counting both spellings of a rotated session. Diagnostics only. */

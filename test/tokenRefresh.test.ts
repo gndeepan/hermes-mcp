@@ -205,3 +205,32 @@ describe("TokenCache", () => {
     expect(cache.keys().join(" ")).not.toContain("r1-secret");
   });
 });
+
+describe("TokenCache.clear", () => {
+  it("forgets every held token, so the next call renews again", async () => {
+    const fetchMock = vi.fn(async () => new Response(tokens("2"), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const cache = new TokenCache("https://hermes.test");
+    await cache.accessTokenFor("r1");
+
+    cache.clear();
+
+    expect(cache.size).toBe(0);
+    await cache.accessTokenFor("r1");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not store a renewal that was still in flight when it was called", async () => {
+    let answer!: (r: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => (answer = resolve))));
+    const cache = new TokenCache("https://hermes.test");
+
+    const inFlight = cache.accessTokenFor("r1");
+    cache.clear();
+    answer(new Response(tokens("2"), { status: 200 }));
+
+    // The caller that asked still gets its answer; nothing outlives the logout.
+    expect((await inFlight).accessToken).toBe("access-2");
+    expect(cache.size).toBe(0);
+  });
+});

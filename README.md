@@ -92,9 +92,16 @@ npm run start:http
 For a single-user run (`HERMES_SINGLE_USER=1`), the server can sign you in
 itself — no copying tokens out of localStorage.
 
-Ask your assistant to call **`hermes_setup`**. If you already have a live
-session it says who you are and moves on. If not, it starts a web server on
-`127.0.0.1`, opens your browser, and returns straight away:
+Just ask your assistant anything. The first `hermes_*` call made while nobody
+is signed in starts a web server on `127.0.0.1`, opens your browser, and
+**waits**. Sign in there and the same call carries on and answers your
+question. If you take longer than `HERMES_LOGIN_WAIT_MS` (50 seconds by
+default), the call answers `[SIGN_IN_REQUIRED]` with the URL instead; finish in
+the browser and ask again — the next call joins the same sign-in.
+
+You can also call **`hermes_setup`** directly. If you already have a live
+session it says who you are and moves on; otherwise it opens the same sign-in
+and returns straight away:
 
 ```
 No Hermes session found.
@@ -108,9 +115,27 @@ server shuts itself down** — it exists for the login and no longer.
 
 The session is written to `~/.hermes-mcp/credentials.json`, readable only by
 you (`0600`, or an owner-only ACL on Windows). From then on the access token is
-refreshed before it expires, without anyone being asked. If the refresh token
-itself dies — leave it a day or two — the stored session is discarded and every
-tool answers `[SESSION_EXPIRED]`, naming `hermes_setup` as the remedy.
+renewed before it expires, and on any `401` it is renewed and the request sent
+once more, without anyone being asked; renewed tokens are saved back to that
+file. If the refresh token itself dies — leave it a day or two — the stored
+session is discarded and the browser sign-in opens again, after which the
+original request completes.
+
+### Who am I, and signing out
+
+- **`hermes_whoami`** shows the signed-in user (id, name, email, status, role,
+  admin flag, last login), the store the session acts on, every store the user
+  can access, where the session came from (`browser sign-in`, `.env` or
+  `request`), when the access token expires and how many minutes are left, and
+  the Hermes base URL and OpenAPI docs URL in use. It never returns a token, and
+  it does not open a browser when nobody is signed in.
+- **`hermes_logout`** signs you out on this machine: it deletes
+  `~/.hermes-mcp/credentials.json`, forgets every renewed token held in memory,
+  closes any sign-in still open in the browser, and blanks
+  `HERMES_ACCESS_TOKEN`, `HERMES_STORE_ID` and `HERMES_REFRESH_TOKEN` in the
+  `.env` the server loaded, so a restart does not sign you straight back in.
+  Hermes has no logout endpoint, so tokens already issued stay valid there
+  until they expire — they are just no longer kept anywhere on your machine.
 
 Two properties worth knowing:
 
@@ -121,9 +146,10 @@ Two properties worth knowing:
   loopback only, and every request must carry a single-use key from the opening
   URL. Anything else gets a `403` with no body.
 
-`hermes_setup` only exists where one signed-in user is meaningful. The shared
+`hermes_setup` and `hermes_logout` only exist where one signed-in user is meaningful. The shared
 HTTP service never builds a credential store at all, and a shared stdio process
-does not advertise the tool.
+does not advertise them. `hermes_whoami` exists everywhere and reports the
+caller's own identity.
 
 ## Authentication
 
@@ -244,6 +270,7 @@ normally and refuses every uncredentialed call with `MISSING_CREDENTIALS`.
 | `HERMES_STORE_ID` | — | See above |
 | `HERMES_REFRESH_TOKEN` | — | Optional. Lets a long local run or CI job survive an expiry. Needs the two above alongside it. |
 | `HERMES_SINGLE_USER` | unset | `1` turns the three above on. Without it they are ignored — see [Single-user fallback](#single-user-fallback). |
+| `HERMES_LOGIN_WAIT_MS` | `50000` | How long a call that opened the browser sign-in waits for it before answering `[SIGN_IN_REQUIRED]`. Kept under the 60-second timeout many MCP clients use. |
 | `PORT` | `8787` | `hermes-mcp-http` only. Ignored by the stdio entry. |
 
 ## Register with Claude Code
@@ -318,6 +345,8 @@ Verify with `claude mcp list` and `claude mcp get hermes-mcp`.
 | `hermes_update_widget` | `PUT /api/v1/widgets/{id}` |
 | `hermes_refresh_openapi` | — (recompiles the schemas above from the live spec) |
 | `hermes_setup` | — (signs in; see Signing in) |
+| `hermes_whoami` | — (the signed-in user, store and session; never a token) |
+| `hermes_logout` | — (clears every local session; see Signing in) |
 | `hermes_find_api` | — (searches the spec; calls nothing) |
 | `hermes_call_api` | any operation in the spec, by method and path |
 

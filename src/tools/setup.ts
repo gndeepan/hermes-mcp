@@ -33,6 +33,11 @@ export interface AuthContext {
    * new sign-in, take over. Mutable, like `pending`.
    */
   envRetired?: boolean;
+  /**
+   * The env file this process read its credentials from, if any, so
+   * `hermes_logout` can blank them there too. Null or absent when none was read.
+   */
+  envFile?: string | null;
   /** Injected by tests, so proving the flow does not open a real browser. */
   openBrowser?: (url: string) => Promise<boolean>;
 }

@@ -7,6 +7,7 @@ import type { SchemaRegistry } from "../registry/schemaRegistry.js";
 import type { CompiledEndpoint } from "../registry/schemaFromOpenApi.js";
 import { ENDPOINTS } from "../registry/endpoints.js";
 import { registerGatewayTools } from "./gateway.js";
+import { registerAccountTools } from "./account.js";
 import { beginLogin, registerSetupTool, type AuthContext } from "./setup.js";
 import type { StoredSession } from "../auth/credentialStore.js";
 import { OperationIndex } from "../registry/operations.js";
@@ -346,7 +347,7 @@ export const sendWithRenewal = async (
  * credentials — over HTTP or in `_meta` — belongs to its caller, and a browser
  * opening on this machine for it would be signing in the wrong person.
  */
-const canSignIn = (ctx: ToolContext, call: CallContext): boolean =>
+export const canSignIn = (ctx: ToolContext, call: CallContext): boolean =>
   ctx.auth !== undefined &&
   ctx.httpCredentials === undefined &&
   ctx.allowEnvFallback !== false &&
@@ -651,6 +652,9 @@ export const registerHermesTools = (server: McpServer, ctx: ToolContext): SyncTo
   registerGatewayTools(server, ctx, { callHermes, assertStoreIds });
   // Only where a signed-in session means something. See ToolContext.auth.
   if (ctx.auth !== undefined) registerSetupTool(server, ctx.auth, ctx.tokens);
+  // hermes_whoami everywhere (it reports the caller's own identity);
+  // hermes_logout only where this process owns a session.
+  registerAccountTools(server, ctx, { callHermes, canSignIn, fallbackCredentials });
 
   return syncToolSchemas;
 };

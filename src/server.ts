@@ -149,7 +149,8 @@ export const buildServer = (
  */
 export const createServer = (
   config: HermesMcpConfig = loadConfig(),
-  logger: Logger = createLogger(config)
+  logger: Logger = createLogger(config),
+  envFile: string | null = null
 ): McpServer => {
   const runtime = createRuntime(config, logger);
 
@@ -162,6 +163,7 @@ export const createServer = (
         login: new HttpHermesLogin(config.hermesBaseUrl),
         logger,
         pending: {},
+        envFile,
       }
     : undefined;
 
@@ -195,7 +197,7 @@ if (process.argv[1]?.endsWith("server.js")) {
     // Named, never contents. "Which file did my credentials come from" is the
     // first question asked when they turn out to be the wrong ones.
     if (envFile !== null) logger.info("loaded env file", { path: envFile });
-    return createServer(config, logger);
+    return createServer(config, logger, envFile);
   });
 }
 /* c8 ignore stop */

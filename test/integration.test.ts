@@ -43,6 +43,7 @@ describe("tools/list", () => {
         ...ENDPOINTS.map((e) => e.toolName),
         "hermes_refresh_openapi",
         "hermes_find_api",
+        "hermes_whoami",
         "hermes_call_api",
       ].sort()
     );

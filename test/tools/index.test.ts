@@ -96,6 +96,7 @@ describe("registerHermesTools", () => {
         ...ENDPOINTS.map((e) => e.toolName),
         "hermes_refresh_openapi",
         "hermes_find_api",
+        "hermes_whoami",
         "hermes_call_api",
       ].sort()
     );
@@ -697,8 +698,8 @@ describe("when Hermes changes its API", () => {
       const { tools } = await client.listTools();
       const names = tools.map((tool) => tool.name);
 
-      // + hermes_refresh_openapi, hermes_find_api, hermes_call_api
-      expect(names).toHaveLength(ENDPOINTS.length + 3);
+      // + hermes_refresh_openapi, hermes_find_api, hermes_call_api, hermes_whoami
+      expect(names).toHaveLength(ENDPOINTS.length + 4);
       // A newly published operation must not become a tool of its own. It is
       // reachable through hermes_call_api, which is a deliberate decision, not
       // an accident of the allowlist growing on its own.

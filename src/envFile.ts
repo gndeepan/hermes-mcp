@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 /**
@@ -72,4 +72,49 @@ export const applyEnvFile = (options: EnvFileOptions = {}): string | null => {
 
   loader(path);
   return path;
+};
+
+/** The keys that make up the single-user identity in an env file. */
+const CREDENTIAL_KEYS = ["HERMES_ACCESS_TOKEN", "HERMES_STORE_ID", "HERMES_REFRESH_TOKEN"] as const;
+
+/**
+ * Blanks the credential values in an env file, for `hermes_logout`.
+ *
+ * Without this a logout only lasts until the next restart, when the file hands
+ * the same identity straight back. Values are emptied rather than lines
+ * deleted, so the file keeps its shape and its comments and the developer can
+ * see exactly where to paste a token again. Everything else in the file —
+ * host, log level — is left alone.
+ *
+ * Returns the keys that actually held a value, so the caller can report what
+ * was cleared. A missing or unwritable file clears nothing and says so by
+ * returning an empty list: a logout that removed the stored session has still
+ * done most of its job.
+ */
+export const clearEnvCredentials = (path: string): string[] => {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf-8");
+  } catch {
+    return [];
+  }
+
+  const cleared: string[] = [];
+  let next = text;
+  for (const key of CREDENTIAL_KEYS) {
+    // Up to the line ending and no further, so a CRLF file stays CRLF.
+    const line = new RegExp(`^([ \t]*(?:export[ \t]+)?${key}[ \t]*=)([^\r\n]*)`, "gm");
+    next = next.replace(line, (_match, head: string, value: string) => {
+      if (value.trim() !== "" && !cleared.includes(key)) cleared.push(key);
+      return head;
+    });
+  }
+
+  if (next === text) return [];
+  try {
+    writeFileSync(path, next, "utf-8");
+  } catch {
+    return [];
+  }
+  return cleared;
 };
