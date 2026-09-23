@@ -17,9 +17,22 @@ export interface OpenApiParameter {
 export interface OpenApiOperation {
   parameters?: OpenApiParameter[];
   requestBody?: unknown;
+  /**
+   * The prose fields, declared because the gateway ranks on them.
+   *
+   * They were always in the document; only the allowlist compiler had no use
+   * for them, since each curated tool carries a hand-written description
+   * instead. `hermes_find_api` has nothing else to rank by.
+   */
+  summary?: string;
+  description?: string;
+  tags?: string[];
+  responses?: Record<string, unknown>;
 }
 
 export interface OpenApiPathItem {
+  /** Parameters that apply to every operation under this path. */
+  parameters?: OpenApiParameter[];
   get?: OpenApiOperation;
   post?: OpenApiOperation;
   put?: OpenApiOperation;
@@ -29,6 +42,8 @@ export interface OpenApiPathItem {
 
 export interface OpenApiDocument {
   paths: Record<string, OpenApiPathItem>;
+  /** Where a `$ref` points. Needed to hydrate a schema for a search result. */
+  components?: { schemas?: Record<string, unknown> };
 }
 
 export type HttpMethod = "get" | "post" | "put" | "delete";
