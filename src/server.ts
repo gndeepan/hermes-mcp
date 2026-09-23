@@ -6,11 +6,13 @@ import { loadConfig, type HermesMcpConfig } from "./config.js";
 import { createLogger, type Logger } from "./logging.js";
 import { registerHermesTools } from "./tools/index.js";
 import { SchemaRegistry } from "./registry/schemaRegistry.js";
+import { OperationIndex } from "./registry/operations.js";
 import { loadSnapshotDoc } from "./registry/snapshot.js";
 import { ENDPOINTS } from "./registry/endpoints.js";
 import { primeRegistry } from "./openapiSync.js";
 import { HermesClient } from "./hermesClient.js";
 import { TokenCache } from "./tokenRefresh.js";
+import type { OpenApiDocument } from "./registry/schemaFromOpenApi.js";
 import type { HttpCredentials } from "./userContext.js";
 
 /**
@@ -35,17 +37,39 @@ export interface ServerRuntime {
    * that session can reach its entry. See `tokenRefresh.ts`.
    */
   tokens: TokenCache;
+  /**
+   * Every operation Hermes publishes, not just the twelve this server curates.
+   *
+   * Held apart from `registry` because they answer different questions.
+   * `SchemaRegistry` compiles the allowlist and discards the document; the
+   * gateway needs the document itself, and rebuilding it per request would mean
+   * parsing 760 KB on every tool call.
+   *
+   * Mutable, unlike the rest of the runtime: a successful spec fetch replaces
+   * it wholesale. Rebuilding is cheaper and far easier to reason about than
+   * reconciling an index in place.
+   */
+  operations: OperationIndex;
+  /** The document `operations` was built from, for resolving `$ref`s at search time. */
+  doc: OpenApiDocument;
 }
 
 export const createRuntime = (
   config: HermesMcpConfig = loadConfig(),
   logger: Logger = createLogger(config)
-): ServerRuntime => ({
-  config,
-  logger,
-  registry: SchemaRegistry.fromDocument(loadSnapshotDoc()),
-  tokens: new TokenCache(config.hermesBaseUrl),
-});
+): ServerRuntime => {
+  // Read once and shared: the registry and the index are two views of the same
+  // document, and parsing it twice would be pure waste.
+  const doc = loadSnapshotDoc();
+  return {
+    config,
+    logger,
+    registry: SchemaRegistry.fromDocument(doc),
+    tokens: new TokenCache(config.hermesBaseUrl),
+    operations: OperationIndex.fromDocument(doc),
+    doc,
+  };
+};
 
 /** What differs between one served unit and the next. */
 export interface ServerOptions {
@@ -84,6 +108,9 @@ export const buildServer = (
     registry,
     createClient: (user) => new HermesClient(config.hermesBaseUrl, user),
     tokens,
+    // The runtime itself, not a copy: hermes_refresh_openapi replaces the
+    // index, and a copy would leave the gateway on the startup document.
+    specs: runtime,
     ...(options.httpCredentials === undefined
       ? {}
       : { httpCredentials: options.httpCredentials }),
@@ -117,7 +144,7 @@ export const createServer = (
   // so the loop has a sync function to push refreshed schemas through.
   const { server, syncToolSchemas } = buildServer(runtime, { allowEnvFallback: config.singleUser });
 
-  void primeRegistry(runtime.registry, config, logger, () => {
+  void primeRegistry(runtime, config, logger, () => {
     const changed = syncToolSchemas();
     if (changed.length > 0) {
       logger.info("re-advertised refreshed tool schemas", { changed });

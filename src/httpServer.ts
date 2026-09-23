@@ -113,7 +113,7 @@ if (process.argv[1]?.endsWith("httpServer.js")) {
 
   // Hoisted out of the per-request factory on purpose. Inside it, every request
   // would start its own timer and its own outbound spec fetch.
-  void primeRegistry(runtime.registry, config, logger);
+  void primeRegistry(runtime, config, logger);
 
   const handler = createHandler({ runtime });
   const port = Number(process.env.PORT ?? 8787);

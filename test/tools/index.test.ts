@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { registerHermesTools, type ToolContext } from "../../src/tools/index.js";
 import { SchemaRegistry } from "../../src/registry/schemaRegistry.js";
+import { OperationIndex } from "../../src/registry/operations.js";
 import { loadSnapshotDoc } from "../../src/registry/snapshot.js";
 import { ENDPOINTS } from "../../src/registry/endpoints.js";
 import { createLogger } from "../../src/logging.js";
@@ -41,13 +42,18 @@ const buildServerAndClient = async (ctx: ToolContext): Promise<Client> => {
   return client;
 };
 
-const baseCtx = (overrides: Partial<ToolContext> = {}): ToolContext => ({
-  config: loadConfig({}),
-  logger: createLogger({ logLevel: "silent" }),
-  registry: SchemaRegistry.fromDocument(loadSnapshotDoc()),
-  createClient: () => ({ request: vi.fn() }) as HermesRequester,
-  ...overrides,
-});
+const baseCtx = (overrides: Partial<ToolContext> = {}): ToolContext => {
+  const doc = loadSnapshotDoc();
+  const registry = SchemaRegistry.fromDocument(doc);
+  return {
+    config: loadConfig({}),
+    logger: createLogger({ logLevel: "silent" }),
+    registry,
+    createClient: () => ({ request: vi.fn() }) as HermesRequester,
+    specs: { registry, operations: OperationIndex.fromDocument(doc), doc },
+    ...overrides,
+  };
+};
 
 const textOf = (result: Awaited<ReturnType<Client["callTool"]>>): string =>
   (result.content as { text: string }[])[0]?.text ?? "";

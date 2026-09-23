@@ -6,9 +6,10 @@ import type { HermesMcpConfig } from "../config.js";
 import type { SchemaRegistry } from "../registry/schemaRegistry.js";
 import type { CompiledEndpoint } from "../registry/schemaFromOpenApi.js";
 import { ENDPOINTS } from "../registry/endpoints.js";
+import { OperationIndex } from "../registry/operations.js";
 import type { HermesRequester } from "../hermesClient.js";
 import { userContextFrom, type HttpCredentials, type UserContext } from "../userContext.js";
-import { fetchOpenApiDoc } from "../openapiSync.js";
+import { fetchOpenApiDoc, type PrimeTarget } from "../openapiSync.js";
 import { isStale, type SessionTokens, type TokenCache } from "../tokenRefresh.js";
 import {
   HermesUnauthenticatedError,
@@ -49,6 +50,16 @@ export interface ToolContext {
    * token, so it takes both a configured server and a consenting caller.
    */
   tokens?: TokenCache;
+  /**
+   * The live specification views, held as a reference rather than copied.
+   *
+   * `hermes_refresh_openapi` *replaces* the operation index — an index cannot
+   * be refreshed in place the way `SchemaRegistry` can — so a context holding
+   * its own copy would keep answering from the document the server started
+   * with, silently, for the rest of the process. Reading through the runtime is
+   * what makes the manual refresh mean anything to the gateway.
+   */
+  specs: PrimeTarget;
 }
 
 /**
@@ -328,9 +339,16 @@ const registerRefreshTool = (
       let changed: string[];
       let stale: string[];
       let refreshed: number;
+      let operations: number;
       try {
         const doc = await fetchOpenApiDoc(ctx.config.openApiDocsUrl, ctx.config.openApiFetchTimeoutMs);
         stale = ctx.registry.refresh(doc, ctx.logger);
+        // The gateway's view moves with the allowlist's. Refreshing one and not
+        // the other would leave hermes_find_api describing operations the
+        // curated tools no longer agree exist.
+        ctx.specs.operations = OperationIndex.fromDocument(doc);
+        ctx.specs.doc = doc;
+        operations = ctx.specs.operations.size;
         changed = syncToolSchemas();
         refreshed = ctx.registry.list().length;
       } catch (err) {
@@ -341,8 +359,11 @@ const registerRefreshTool = (
         refreshed,
         changed: changed.length,
         stale: stale.length,
+        operations,
       });
-      return { content: [{ type: "text", text: JSON.stringify({ refreshed, changed, stale }) }] };
+      return {
+        content: [{ type: "text", text: JSON.stringify({ refreshed, changed, stale, operations }) }],
+      };
     }) as Parameters<typeof server.registerTool>[2]
   );
 };

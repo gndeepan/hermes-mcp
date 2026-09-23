@@ -2,6 +2,7 @@ import type { Logger } from "./logging.js";
 import { errorMessage } from "./errors.js";
 import type { OpenApiDocument } from "./registry/schemaFromOpenApi.js";
 import type { SchemaRegistry } from "./registry/schemaRegistry.js";
+import { OperationIndex } from "./registry/operations.js";
 
 export const fetchOpenApiDoc = async (url: string, timeoutMs: number): Promise<OpenApiDocument> => {
   const controller = new AbortController();
@@ -40,17 +41,32 @@ export interface PrimeConfig {
  * re-advertise schemas that actually changed. Running it on failure would
  * announce a refresh that did not happen.
  */
+/**
+ * The slice of the runtime a load replaces. Declared structurally so this
+ * module does not import the server, and so a test can hand it a plain object.
+ */
+export interface PrimeTarget {
+  registry: SchemaRegistry;
+  operations: OperationIndex;
+  doc: OpenApiDocument;
+}
+
 export const primeRegistry = async (
-  registry: SchemaRegistry,
+  target: PrimeTarget,
   config: PrimeConfig,
   logger: Logger,
   onRefreshed?: () => void
 ): Promise<void> => {
   try {
     const doc = await fetchOpenApiDoc(config.openApiDocsUrl, config.openApiFetchTimeoutMs);
-    const stale = registry.refresh(doc, logger);
+    const stale = target.registry.refresh(doc, logger);
+    // Both views move together or neither does: an index built from one
+    // document beside a registry compiled from another is a bug waiting to be
+    // reported as "the tool says this parameter exists and Hermes disagrees".
+    target.operations = OperationIndex.fromDocument(doc);
+    target.doc = doc;
     onRefreshed?.();
-    logger.info("openapi schema loaded", { stale: stale.length });
+    logger.info("openapi schema loaded", { stale: stale.length, operations: target.operations.size });
   } catch (err) {
     logger.warn("openapi schema fetch failed, keeping bundled snapshot", {
       error: errorMessage(err),
