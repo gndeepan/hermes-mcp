@@ -17,9 +17,8 @@ export interface LoginSession {
  *
  * Everything else in this feature — the loopback server, the pages, the store
  * picker, the credential file, the expiry handling — is written against this
- * interface and tested with a fake. That is deliberate: the send step is
- * confirmed against live Hermes, the verify step is not, and confining the
- * unconfirmed part to one method is what lets the rest ship without waiting.
+ * interface and tested with a fake, so the wire format lives here alone. Both
+ * steps mirror the dashboard's own login, which is the reference for them.
  */
 export interface HermesLogin {
   sendCode(email: string): Promise<void>;
@@ -29,23 +28,16 @@ export interface HermesLogin {
 const SEND_PATH = "/api/v1/otp/email/send";
 
 /**
- * Where the verify step posts, and what it posts.
+ * Where the verify step posts, exactly as the dashboard's own login does it
+ * (`dashboard/packages/api/services/auth.ts`, `loginUser`).
  *
- * **This is the one contract in the feature that has not been confirmed against
- * a real login.** `POST /api/v1/otp/email/send` is confirmed — it returns
- * `201 {"data":{"message":"Otp sent successfully"}}` and delivers a code. What
- * turns that code into a merchant session is not published in the OpenAPI
- * document: `/api/v1/otp-login/verify-otp` returns a `customerAccessToken`,
- * which is a storefront shopper credential and not what this server uses, and
- * `/api/v1/auth/web` answers `401 code 1240 "Invalid credentials"` when called
- * without one.
- *
- * So the path and the field names are overridable from the environment rather
- * than compiled in. When the real contract is known, either set these two
- * variables or change the defaults here — nothing else in the feature moves.
+ * The code does not travel in the body. `POST /api/v1/auth/web` takes an empty
+ * JSON body and reads the email and code from an HTTP Basic header,
+ * `Basic base64(email:otp)`. The earlier guess — `/api/v1/otp/email/verify`
+ * with the code in the body — is answered by Hermes with a bare 403, which is
+ * what a merchant saw after typing a perfectly good code.
  */
-const VERIFY_PATH = process.env.HERMES_OTP_VERIFY_PATH ?? "/api/v1/otp/email/verify";
-const VERIFY_CODE_FIELD = process.env.HERMES_OTP_CODE_FIELD ?? "otp";
+const VERIFY_PATH = "/api/v1/auth/web";
 
 /**
  * Raised when Hermes answers the verify step with something that is not a
@@ -60,8 +52,7 @@ export class LoginContractError extends Error {
   constructor(detail: string) {
     super(
       `Hermes did not return a merchant session from ${VERIFY_PATH}: ${detail}. ` +
-        "Set HERMES_OTP_VERIFY_PATH and HERMES_OTP_CODE_FIELD to the endpoint the " +
-        "dashboard uses, or correct the defaults in src/auth/hermesLogin.ts."
+        "Compare src/auth/hermesLogin.ts against the dashboard's loginUser call."
     );
     this.name = "LoginContractError";
   }
@@ -111,14 +102,19 @@ const sessionFrom = (payload: unknown): LoginSession => {
 };
 
 /** One JSON POST, with Hermes' own error surfaced rather than a reconstructed one. */
-const post = async (url: string, body: unknown, timeoutMs: number): Promise<unknown> => {
+const post = async (
+  url: string,
+  body: unknown,
+  timeoutMs: number,
+  headers: Record<string, string> = {}
+): Promise<unknown> => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      headers: { "Content-Type": "application/json", Accept: "application/json", ...headers },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -157,11 +153,12 @@ export class HttpHermesLogin implements HermesLogin {
   }
 
   async verifyCode(email: string, code: string): Promise<LoginSession> {
-    const payload = await post(
-      new URL(VERIFY_PATH, this.baseUrl).toString(),
-      { email, [VERIFY_CODE_FIELD]: code },
-      this.timeoutMs
-    );
+    // `Buffer`, not `btoa`: `btoa` throws on any character outside Latin-1,
+    // and an email address may carry one.
+    const basic = Buffer.from(`${email}:${code}`, "utf-8").toString("base64");
+    const payload = await post(new URL(VERIFY_PATH, this.baseUrl).toString(), {}, this.timeoutMs, {
+      Authorization: `Basic ${basic}`,
+    });
     try {
       return sessionFrom(payload);
     } catch (err) {
