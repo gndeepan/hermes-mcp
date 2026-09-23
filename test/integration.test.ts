@@ -39,7 +39,12 @@ describe("tools/list", () => {
   it("advertises every allowlisted tool plus hermes_refresh_openapi, each with a description and schema", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(
-      [...ENDPOINTS.map((e) => e.toolName), "hermes_refresh_openapi"].sort()
+      [
+        ...ENDPOINTS.map((e) => e.toolName),
+        "hermes_refresh_openapi",
+        "hermes_find_api",
+        "hermes_call_api",
+      ].sort()
     );
     for (const tool of tools) {
       // A description is the only thing a model sees before picking a tool, so

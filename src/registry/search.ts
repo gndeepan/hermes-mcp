@@ -125,7 +125,26 @@ const score = (op: IndexedOperation, parsed: ParsedQuery): number => {
   // "get" and means it should not outrank the right resource under a verb they
   // guessed wrong.
   if (total > 0 && parsed.hint !== undefined && op.method === parsed.hint) total += 3;
-  return total;
+  if (total === 0) return 0;
+
+  // Then subtract for what the query did not ask about. Two paths can match the
+  // same noun equally and still differ in how much *else* they are about:
+  // /users/{id} and /users/me both match "user", but "me" is a segment nobody
+  // asked for, and it makes the operation narrower than the question. Counting
+  // unexplained literal segments is what puts the general read ahead of the
+  // alias without hard-coding either.
+  //
+  // Placeholders are not counted: `{id}` is not a topic, it is the hole the
+  // caller fills. Nor is the version prefix, which every path carries.
+  const unexplained = segments.filter(
+    (seg, i) =>
+      !(i === 0 && seg === "api") &&
+      !/^v\d+$/.test(seg) &&
+      !op.path.split("/").filter(Boolean)[i]?.startsWith("{") &&
+      !parsed.tokens.some((t) => seg === t || seg.includes(t))
+  ).length;
+
+  return total - unexplained;
 };
 
 const paramDocs = (parameters: OpenApiParameter[], where: string): ParamDoc[] =>

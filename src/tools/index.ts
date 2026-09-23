@@ -6,6 +6,7 @@ import type { HermesMcpConfig } from "../config.js";
 import type { SchemaRegistry } from "../registry/schemaRegistry.js";
 import type { CompiledEndpoint } from "../registry/schemaFromOpenApi.js";
 import { ENDPOINTS } from "../registry/endpoints.js";
+import { registerGatewayTools } from "./gateway.js";
 import { OperationIndex } from "../registry/operations.js";
 import type { HermesRequester } from "../hermesClient.js";
 import { userContextFrom, type HttpCredentials, type UserContext } from "../userContext.js";
@@ -150,7 +151,7 @@ export const buildRequest = (
   return { path, query, body: compiled.hasBody ? args.body : undefined };
 };
 
-type ToolReturn = ToolResult | { content: [{ type: "text"; text: string }] };
+export type ToolReturn = ToolResult | { content: [{ type: "text"; text: string }] };
 
 /**
  * A call may only act on the store it authenticated as.
@@ -163,15 +164,26 @@ type ToolReturn = ToolResult | { content: [{ type: "text"; text: string }] };
  *
  * Tools without a `storeId` argument are unaffected: the header alone decides
  * what they see.
+ *
+ * Takes the candidate ids rather than the argument bag because the gateway
+ * nests them. A curated tool's `storeId` is a top-level argument; a
+ * `hermes_call_api` call carries it inside `pathParams` or `body`, and reading
+ * only the top level — as this did — would let a gateway call address another
+ * merchant's store, authorised by the caller's own token and therefore
+ * answering with data rather than an error.
  */
-const assertActingOnOwnStore = (args: Record<string, unknown>, user: UserContext): void => {
-  const named = args.storeId;
-  if (named === undefined || named === null) return;
+export const assertStoreIds = (candidates: unknown[], user: UserContext): void => {
+  for (const named of candidates) {
+    if (named === undefined || named === null) continue;
 
-  const asText = typeof named === "number" ? String(named) : named;
-  if (typeof asText !== "string" || asText === "") return;
-  if (asText !== user.storeId) throw new StoreMismatchError(asText, user.storeId);
+    const asText = typeof named === "number" ? String(named) : named;
+    if (typeof asText !== "string" || asText === "") continue;
+    if (asText !== user.storeId) throw new StoreMismatchError(asText, user.storeId);
+  }
 };
+
+const assertActingOnOwnStore = (args: Record<string, unknown>, user: UserContext): void =>
+  assertStoreIds([args.storeId], user);
 
 /** How a renewal came to happen, for the log line. Never the tokens themselves. */
 type RenewalReason = "expired" | "rejected";
@@ -199,7 +211,7 @@ type RenewalReason = "expired" | "rejected";
  * not: a 401 means Hermes refused the request before acting on it, so there is
  * no half-done write to duplicate.
  */
-const sendWithRenewal = async (
+export const sendWithRenewal = async (
   ctx: ToolContext,
   user: UserContext,
   send: (acting: UserContext) => Promise<unknown>,
@@ -291,7 +303,9 @@ const wrap =
       );
 
       ctx.logger.info("tool call ok", { tool: toolName, traceId, durationMs: Date.now() - start });
-      return { content: [{ type: "text", text: JSON.stringify(data) }] };
+      // See gateway.ts: an empty Hermes body would otherwise leave `text`
+      // undefined and make the result invalid against the MCP schema.
+      return { content: [{ type: "text", text: JSON.stringify(data ?? null) }] };
     } catch (err) {
       ctx.logger.info("tool call failed", { tool: toolName, traceId, durationMs: Date.now() - start });
       return toToolResult(err, ctx.logger, toolName);
@@ -402,5 +416,10 @@ export const registerHermesTools = (server: McpServer, ctx: ToolContext): SyncTo
   };
 
   registerRefreshTool(server, ctx, syncToolSchemas);
+  // Last, so the curated tools are listed first. A model reading tools/list
+  // top-down meets the well-described, purpose-built tools before the
+  // catch-all, which is the order we want it to prefer them in.
+  registerGatewayTools(server, ctx, { sendWithRenewal, assertStoreIds });
+
   return syncToolSchemas;
 };

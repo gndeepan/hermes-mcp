@@ -146,6 +146,11 @@ const KNOWN_ERROR_CODES: [new (...args: never[]) => Error, string][] = [
   [SessionExpiredError, "SESSION_EXPIRED"],
   [StoreMismatchError, "STORE_MISMATCH"],
   [InvalidPathParameterError, "INVALID_PATH_PARAM"],
+  // Defined since the allowlist compiler needed it, but never mapped — so a
+  // caller naming an operation the document does not have got "The tool failed
+  // unexpectedly. Reference <hex>", which is accurate about nothing and
+  // actionable by no one. The gateway makes this a routine, correctable answer.
+  [MissingOperationError, "UNKNOWN_OPERATION"],
 ];
 
 /**

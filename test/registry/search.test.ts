@@ -7,11 +7,21 @@ const DOC = loadSnapshotDoc();
 const INDEX = OperationIndex.fromDocument(DOC);
 
 describe("searchOperations", () => {
-  it("puts the user read first for 'get user info'", () => {
-    // Hermes publishes no GET /api/v1/users/{id} — /users/{id} is PUT and
-    // DELETE only — so the operation that answers this is /users/me.
+  it("puts the plain user read first for 'get user info'", () => {
+    // Not /users/me, which is a narrower alias for the current user, and not
+    // any of the nested store/account user paths.
     const { candidates } = searchOperations(INDEX, DOC, { query: "get user info" });
-    expect(candidates[0]).toMatchObject({ method: "get", path: "/api/v1/users/me" });
+    expect(candidates[0]).toMatchObject({ method: "get", path: "/api/v1/users/{id}" });
+  });
+
+  it("prefers the operation with fewer unexplained path segments", () => {
+    // /users/{id} and /users/me score identically on the token "user"; the
+    // tie-break is that "me" is a segment the query never asked for.
+    const { candidates } = searchOperations(INDEX, DOC, { query: "user", limit: 25 });
+    const paths = candidates.map((c) => c.path);
+    expect(paths).toContain("/api/v1/users/{id}");
+    expect(paths).toContain("/api/v1/users/me");
+    expect(paths.indexOf("/api/v1/users/{id}")).toBeLessThan(paths.indexOf("/api/v1/users/me"));
   });
 
   it("does not let the HTTP verb in a query outrank the noun", () => {
