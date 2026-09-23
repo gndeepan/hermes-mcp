@@ -4,6 +4,7 @@ import type {
   OpenApiOperation,
   OpenApiParameter,
 } from "./schemaFromOpenApi.js";
+import { InvalidPathParameterError } from "../errors.js";
 
 /**
  * The methods this server will index. Deliberately not "every key on a path
@@ -102,3 +103,82 @@ export class OperationIndex {
     return this.byKey.size;
   }
 }
+
+const PLACEHOLDER = /\{([^}]+)\}/g;
+
+/**
+ * Fills a path template from caller-supplied values.
+ *
+ * Every value is percent-encoded, without exception. A path parameter is the
+ * one place a caller's string becomes part of the URL's *structure* rather
+ * than its content, so a value of `../../admin` or `a/b?x=1` would not be a
+ * wrong argument — it would be a different request, to an endpoint nobody
+ * chose. Encoding turns it back into what it was meant to be: one segment.
+ */
+export const substitutePath = (template: string, params: Record<string, unknown>): string =>
+  template.replace(PLACEHOLDER, (_match, name: string) => {
+    const raw = params[name];
+    if (raw === undefined || raw === null) {
+      throw new InvalidPathParameterError(template, `no value given for {${name}}`);
+    }
+    if (typeof raw === "object") {
+      throw new InvalidPathParameterError(
+        template,
+        `{${name}} was given an object, which is not an identifier`
+      );
+    }
+    const text = String(raw).trim();
+    if (text === "") {
+      throw new InvalidPathParameterError(template, `{${name}} was given an empty value`);
+    }
+    return encodeURIComponent(text);
+  });
+
+/**
+ * Narrows caller-supplied query values to the strings the transport takes.
+ *
+ * `HermesClient.request` types `query` as `Record<string, string>`, but a model
+ * composing JSON writes `{page: 1}` and `{tags: ["a","b"]}` without thinking
+ * about it. Coercing here is the difference between a working call and
+ * `?page=[object Object]`, which Hermes rejects with a complaint about a
+ * parameter the caller believes it sent correctly.
+ *
+ * Null and undefined are dropped rather than sent: `?a=null` filters on the
+ * literal string "null", which is never what was meant.
+ */
+export const coerceQuery = (query: Record<string, unknown>): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(query)) {
+    if (value === null || value === undefined) continue;
+    if (Array.isArray(value)) {
+      const parts = value.filter((v) => v !== null && v !== undefined && typeof v !== "object");
+      if (parts.length > 0) out[key] = parts.map((v) => String(v)).join(",");
+      continue;
+    }
+    if (typeof value === "object") continue;
+    out[key] = String(value);
+  }
+  return out;
+};
+
+/**
+ * Replaces a `$ref` with the schema it names, one level only.
+ *
+ * One level is a size decision, not a correctness one. Hermes' component
+ * schemas reference each other freely, and following them all for ten
+ * candidates would return most of a 760 KB document to answer "is there an API
+ * for this". A remaining `{"$ref": "#/components/schemas/Foo"}` is still
+ * legible to a model, which can ask about that operation specifically.
+ */
+export const resolveRefOnce = (doc: OpenApiDocument, schema: unknown): unknown => {
+  if (schema === null || typeof schema !== "object") return schema;
+  const ref = (schema as { $ref?: unknown }).$ref;
+  if (typeof ref !== "string") return schema;
+
+  const prefix = "#/components/schemas/";
+  const name = ref.startsWith(prefix) ? ref.slice(prefix.length) : "";
+  const target = name === "" ? undefined : doc.components?.schemas?.[name];
+  // An unresolvable ref is handed back as-is: it names the shape, which tells a
+  // reader more than silently becoming null would.
+  return target ?? schema;
+};
