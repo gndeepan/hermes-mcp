@@ -31,6 +31,24 @@ const IDEMPOTENT = new Set(["GET", "HEAD", "PUT", "DELETE"]);
 /** Waits between attempts. Short: a merchant is watching a spinner. */
 const BACKOFF_MS = [250, 1_000];
 
+/**
+ * What Hermes said went wrong, from a 5xx body.
+ *
+ * Hermes answers a server error with `{"error":{"message":"Something went
+ * wrong!","detail":"..."}}`, and the detail is the only part that says what
+ * actually broke. Capped, because it can be a Java stack message.
+ */
+const serverErrorDetail = (body: string): string => {
+  try {
+    const error = (JSON.parse(body) as { error?: { detail?: unknown; message?: unknown } }).error;
+    const detail = typeof error?.detail === "string" && error.detail !== "" ? error.detail : error?.message;
+    if (typeof detail === "string" && detail !== "") return detail.slice(0, 300);
+  } catch {
+    // Not JSON: fall through to the generic wording.
+  }
+  return "Hermes reported an internal error";
+};
+
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -110,7 +128,7 @@ export class HermesClient implements HermesRequester {
     if (response.status === 403) throw new HermesForbiddenError(path);
     if (response.status === 404) throw new HermesNotFoundError(path);
     if (response.status >= 500) {
-      throw new HermesUnavailableError(path, new Error(`Hermes returned ${response.status}`));
+      throw new HermesUnavailableError(path, new Error(serverErrorDetail(await response.text())), response.status);
     }
     if (response.status >= 400) {
       throw new HermesRejectedError(path, response.status, await response.text());

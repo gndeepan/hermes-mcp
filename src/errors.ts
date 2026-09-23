@@ -29,9 +29,24 @@ export class HermesRejectedError extends Error {
   }
 }
 
+/**
+ * No usable answer from Hermes: either none came back, or Hermes answered with
+ * a 5xx. Both are worth retrying, so they share a type; they do not share a
+ * message. "Unreachable" for a 500 sends someone checking their network when
+ * Hermes answered perfectly well and failed on its own side — so a server
+ * error says so, with the detail Hermes gave.
+ */
 export class HermesUnavailableError extends Error {
-  constructor(readonly path: string, readonly cause: unknown) {
-    super(`Hermes is unreachable calling ${path}: ${errorMessage(cause)}`);
+  constructor(
+    readonly path: string,
+    readonly cause: unknown,
+    readonly status?: number
+  ) {
+    super(
+      status === undefined
+        ? `Hermes is unreachable calling ${path}: ${errorMessage(cause)}`
+        : `Hermes failed with ${status} on ${path}: ${errorMessage(cause)}`
+    );
     this.name = "HermesUnavailableError";
   }
 }

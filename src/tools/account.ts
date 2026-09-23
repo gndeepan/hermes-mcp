@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import * as z from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
-import { HermesUnauthenticatedError, toToolResult } from "../errors.js";
+import { HermesUnauthenticatedError, errorMessage, toToolResult } from "../errors.js";
 import { clearEnvCredentials } from "../envFile.js";
 import { callAssertsIdentity, type EnvCredentials, type UserContext } from "../userContext.js";
 // Types only, for the same reason as `gateway.ts`: `index.ts` imports this
@@ -91,6 +91,37 @@ const storesFrom = (stores: unknown): { id: string; name: string; domain: string
     ];
   });
 
+/**
+ * The user's profile, from `/users/me`, or from `/users/{id}` when that fails.
+ *
+ * `/users/me` has been seen to fail with a 500 for a real account, inside
+ * Hermes (a null `isAdmin` it unboxes), while `/users/{id}` for the very same
+ * user answers with the same fields. So a failure there is not the end of the
+ * answer. A rejected session still is: that is thrown, so renewal can run.
+ *
+ * Never throws for anything else. Who is signed in, which store and when the
+ * token expires are all known without a profile, and failing the whole tool
+ * over one broken endpoint would hide them too.
+ */
+const profileOf = async (
+  client: { request: (method: string, path: string) => Promise<unknown> },
+  knownUserId: string | undefined
+): Promise<{ me: unknown; profileError?: string }> => {
+  try {
+    return { me: await client.request("GET", "/api/v1/users/me") };
+  } catch (err) {
+    if (err instanceof HermesUnauthenticatedError) throw err;
+    if (knownUserId !== undefined && knownUserId !== "") {
+      try {
+        return { me: await client.request("GET", `/api/v1/users/${encodeURIComponent(knownUserId)}`) };
+      } catch (fallback) {
+        if (fallback instanceof HermesUnauthenticatedError) throw fallback;
+      }
+    }
+    return { me: null, profileError: `Hermes could not load the user profile: ${errorMessage(err)}` };
+  }
+};
+
 /** Where this call's identity came from, in words a user recognises. */
 const sourceOf = (ctx: ToolContext, call: CallContext): string => {
   if (ctx.httpCredentials !== undefined || callAssertsIdentity(call?.mcpReq?._meta)) return "request";
@@ -117,6 +148,11 @@ export const registerAccountTools = (server: McpServer, ctx: ToolContext, deps: 
           );
         }
 
+        // The signed-in user's id, when this process knows it: the profile
+        // fallback needs it, and only a browser sign-in records one.
+        const source = sourceOf(ctx, call);
+        const knownUserId = source === "browser sign-in" ? ctx.auth?.store.read()?.userId : undefined;
+
         let acting: UserContext | undefined;
         const result = await deps.callHermes(
           ctx,
@@ -126,19 +162,22 @@ export const registerAccountTools = (server: McpServer, ctx: ToolContext, deps: 
             const client = ctx.createClient(renewed);
             // Both at once. The store list is a nicety: if it fails for any
             // reason but a dead session, the profile is still the answer.
-            const [me, stores] = await Promise.all([
-              client.request("GET", "/api/v1/users/me"),
+            const [profile, stores] = await Promise.all([
+              profileOf(client, knownUserId),
               client.request("GET", "/api/v1/users/me/stores").catch((err: unknown) => {
                 if (err instanceof HermesUnauthenticatedError) throw err;
                 return null;
               }),
             ]);
-            return { me, stores };
+            return { ...profile, stores };
           },
           (reason) => ctx.logger.info("renewed hermes session", { tool: WHOAMI_TOOL, traceId, reason })
         );
 
-        const { me, stores } = result as { me: unknown; stores: unknown };
+        const { me, profileError, stores } = result as { me: unknown; profileError?: string; stores: unknown };
+        if (profileError !== undefined) {
+          ctx.logger.warn("whoami could not load the profile", { tool: WHOAMI_TOOL, traceId, error: profileError });
+        }
         const storeList = storesFrom(stores);
         const storeId = acting?.storeId ?? null;
         const stored = ctx.auth?.store.read();
@@ -152,11 +191,12 @@ export const registerAccountTools = (server: McpServer, ctx: ToolContext, deps: 
         return text(
           JSON.stringify({
             signedIn: true,
-            user: profileFrom(me),
+            user: me === null ? null : profileFrom(me),
+            ...(profileError === undefined ? {} : { userError: profileError }),
             store: { id: storeId, name: storeName },
             stores: stores === null ? null : storeList,
             session: {
-              source: sourceOf(ctx, call),
+              source,
               accessTokenExpiresAt: isoOrNull(expiresAt),
               accessTokenExpiresInMinutes: minutesUntil(expiresAt),
               renewable: acting?.refreshToken !== undefined,

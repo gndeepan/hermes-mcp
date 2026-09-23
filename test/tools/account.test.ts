@@ -14,7 +14,7 @@ import { loadSnapshotDoc } from "../../src/registry/snapshot.js";
 import { loadConfig } from "../../src/config.js";
 import { createLogger } from "../../src/logging.js";
 import { clearEnvCredentials } from "../../src/envFile.js";
-import { HermesForbiddenError } from "../../src/errors.js";
+import { HermesForbiddenError, HermesUnavailableError } from "../../src/errors.js";
 import { TokenCache } from "../../src/tokenRefresh.js";
 
 const logger = createLogger({ logLevel: "silent" });
@@ -57,6 +57,7 @@ const connect = async (
     env?: ToolContext["config"]["credentials"];
     envFile?: string;
     stores?: () => Promise<unknown>;
+    me?: () => Promise<unknown>;
     tokens?: TokenCache;
   } = {}
 ) => {
@@ -87,7 +88,8 @@ const connect = async (
     createClient: (user) => ({
       request: async (_method: string, path: string) => {
         requests.push({ token: user.accessToken, path });
-        if (path === "/api/v1/users/me") return ME;
+        if (path === "/api/v1/users/me") return (options.me ?? (async () => ME))();
+        if (path === "/api/v1/users/usr_1") return ME;
         if (path === "/api/v1/users/me/stores") return (options.stores ?? (async () => STORES))();
         return { ok: true };
       },
@@ -174,6 +176,43 @@ describe("hermes_whoami", () => {
 
     expect(body.user.id).toBe("usr_1");
     expect(body.stores).toBeNull();
+  });
+
+  it("falls back to /users/{id} when Hermes fails on /users/me", async () => {
+    // Seen live: /users/me 500s inside Hermes for an account whose isAdmin is
+    // null, while /users/{id} answers for the same user.
+    const { client, auth, requests } = await connect({
+      me: async () => {
+        throw new HermesUnavailableError("/api/v1/users/me", new Error("getIsAdmin() is null"), 500);
+      },
+    });
+    auth!.store.save(STORED);
+
+    const result = await whoami(client);
+    const body = JSON.parse(textOf(result));
+
+    expect(result.isError).toBeFalsy();
+    expect(body.user).toMatchObject({ id: "usr_1", name: "Deepan" });
+    expect(body.userError).toBeUndefined();
+    expect(requests.map((r) => r.path)).toContain("/api/v1/users/usr_1");
+  });
+
+  it("still answers with the store and session when no profile can be loaded", async () => {
+    const { client } = await connect({
+      env: { accessToken: "env-acc", storeId: "str_1" },
+      me: async () => {
+        throw new HermesUnavailableError("/api/v1/users/me", new Error("boom"), 500);
+      },
+    });
+
+    const result = await whoami(client);
+    const body = JSON.parse(textOf(result));
+
+    expect(result.isError).toBeFalsy();
+    expect(body.user).toBeNull();
+    expect(body.userError).toContain("Hermes failed with 500 on /api/v1/users/me: boom");
+    expect(body.store.id).toBe("str_1");
+    expect(body.hermes.baseUrl).toBe("https://hermes-atlas.vajro.com");
   });
 
   it("reports a .env session as coming from .env", async () => {

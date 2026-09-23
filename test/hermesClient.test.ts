@@ -238,3 +238,23 @@ describe("HermesClient retries", () => {
     await expect(client.request("get", "/api/v1/themes/active")).rejects.toThrow(/hermes\.test/);
   });
 });
+
+describe("a Hermes server error", () => {
+  it("says Hermes failed, with Hermes' own detail, not that it was unreachable", async () => {
+    const body = JSON.stringify({
+      error: { status: "INTERNAL_SERVER_ERROR", message: "Something went wrong!", detail: "getIsAdmin() is null" },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status: 500 })));
+    vi.useFakeTimers();
+
+    const pending = new HermesClient("https://hermes.test", { accessToken: "t", storeId: "s" })
+      .request("GET", "/api/v1/users/me")
+      .catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
+    const err = await pending;
+
+    expect(err).toBeInstanceOf(HermesUnavailableError);
+    expect((err as Error).message).toBe("Hermes failed with 500 on /api/v1/users/me: getIsAdmin() is null");
+    expect((err as Error).message).not.toContain("unreachable");
+  });
+});
