@@ -45,6 +45,57 @@ const CALL_DESCRIPTION =
   "immediately and irreversibly, using the caller's own credentials. This server cannot ask a human for " +
   "confirmation — it has no channel to one — so confirm any non-GET call with the user before making it.";
 
+/**
+ * The value types each argument really accepts, spelled out.
+ *
+ * Two things force this to be explicit rather than a convenient `z.unknown()`.
+ * A bare `z.unknown()` compiles to a schema with no validation keyword at all —
+ * the object-literal spelling of `true` — which advertises a shape while
+ * constraining nothing. And a plain union of primitives collapses to
+ * `type: ["string","number","boolean"]`, whose array form several MCP clients
+ * read as a single string and then either reject the tool or drop the
+ * constraint. Per-branch descriptions keep the union as `anyOf`, one `type`
+ * each, which every client reads the same way.
+ *
+ * They also describe what the code already does: `substitutePath` refuses an
+ * object and an empty string, and `coerceQuery` drops an object.
+ */
+const PATH_VALUE = z.union([
+  z.string().min(1).describe("an identifier"),
+  z.number().describe("a numeric identifier"),
+]);
+
+const QUERY_VALUE = z.union([
+  z.string().describe("text"),
+  z.number().describe("a number"),
+  z.boolean().describe("true or false"),
+  z.array(PATH_VALUE).describe("a list, sent comma-separated"),
+]);
+
+/**
+ * Any JSON value, defined recursively so nested objects and arrays are typed
+ * all the way down rather than bottoming out in a bare `{}`.
+ */
+const JSON_VALUE: z.ZodType = z.lazy(() =>
+  z.union([
+    z.string().describe("text"),
+    z.number().describe("a number"),
+    z.boolean().describe("true or false"),
+    z.array(JSON_VALUE).describe("a list"),
+    z.record(z.string(), JSON_VALUE).describe("a nested object"),
+  ])
+);
+
+/**
+ * A request body is an object for 136 of Hermes' 138 body-taking operations,
+ * and a top-level array for the other two (`PUT /api/v1/store-switchers` and
+ * `PUT /api/v1/multilanguage`). Both spellings are accepted.
+ */
+const BODY = z.union([
+  z.record(z.string(), JSON_VALUE).describe("a JSON object"),
+  z.array(JSON_VALUE).describe("a JSON array"),
+]);
+
 /** Narrows an argument that should be a JSON object, without throwing on the alternatives. */
 const asRecord = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value)
@@ -107,11 +158,14 @@ export const registerGatewayTools = (
           .describe("The HTTP method, exactly as hermes_find_api reported it"),
         path: z.string().describe("The path TEMPLATE with its braces intact, e.g. /api/v1/users/{id}"),
         pathParams: z
-          .record(z.string(), z.unknown())
+          .record(z.string(), PATH_VALUE)
           .optional()
-          .describe("A value for every {placeholder} in the path"),
-        query: z.record(z.string(), z.unknown()).optional().describe("Query string parameters"),
-        body: z.unknown().optional().describe("JSON request body, for post and put"),
+          .describe("A value for every {placeholder} in the path, e.g. {\"id\": \"str_123\"}"),
+        query: z
+          .record(z.string(), QUERY_VALUE)
+          .optional()
+          .describe("Query string parameters. An array is sent comma-separated"),
+        body: BODY.optional().describe("JSON request body, for post and put"),
       }),
     },
     (async (args: Record<string, unknown>, call: CallContext): Promise<ToolReturn> => {
