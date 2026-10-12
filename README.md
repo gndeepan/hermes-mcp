@@ -14,6 +14,32 @@ but not from an install.)
 
 ## Install
 
+### From GitHub (no registry login)
+
+```bash
+claude mcp add hermes -e HERMES_SINGLE_USER=1 -- npx -y github:gndeepan/hermes-mcp
+```
+
+Or in an MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "hermes": {
+      "command": "npx",
+      "args": ["-y", "github:gndeepan/hermes-mcp"],
+      "env": { "HERMES_SINGLE_USER": "1" }
+    }
+  }
+}
+```
+
+npm clones the repo and builds it on install (`prepare`), so the first start
+takes a few seconds longer. The first tool call opens the Hermes sign-in in the
+browser; see [Signing in](#signing-in).
+
+### From Bitbucket Packages
+
 Published as **`@superfans/hermes-mcp`** to the Vajro workspace's
 [Bitbucket Packages](https://npm.apkg.io/vajro/) registry.
 

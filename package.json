@@ -27,7 +27,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "start:http": "node dist/httpServer.js"
+    "start:http": "node dist/httpServer.js",
+    "prepare": "node scripts/build.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
