@@ -1,6 +1,6 @@
 {
   "name": "@superfans/hermes-mcp",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "files": [
     "dist",
     "openapi/hermes-api-docs.json",
@@ -27,8 +27,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "start:http": "node dist/httpServer.js",
-    "prepare": "node scripts/build.mjs"
+    "start:http": "node dist/httpServer.js"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",

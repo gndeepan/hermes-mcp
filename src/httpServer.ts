@@ -24,6 +24,7 @@ import { primeRegistry } from "./openapiSync.js";
 import { buildServer, createRuntime, type ServerRuntime } from "./server.js";
 import { toEpochMillis } from "./tokenRefresh.js";
 import type { HttpCredentials } from "./userContext.js";
+import { invokedAs } from "./entry.js";
 
 /** How a merchant identifies itself to this service. */
 const STORE_HEADER = "x-store-id";
@@ -106,7 +107,7 @@ export const createHandler = (options: HttpEntryOptions = {}) => {
 };
 
 /* c8 ignore start — process entry point, covered by running the binary */
-if (process.argv[1]?.endsWith("httpServer.js")) {
+if (invokedAs("httpServer.js")) {
   const config = loadConfig();
   const logger = createLogger(config);
   const runtime = createRuntime(config, logger);

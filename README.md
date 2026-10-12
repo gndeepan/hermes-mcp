@@ -16,8 +16,11 @@ but not from an install.)
 
 ### From GitHub (no registry login)
 
+Each [GitHub release](https://github.com/gndeepan/hermes-mcp/releases) carries the built package, so nothing is compiled on install:
+
 ```bash
-claude mcp add hermes -e HERMES_SINGLE_USER=1 -- npx -y github:gndeepan/hermes-mcp
+claude mcp add hermes -e HERMES_SINGLE_USER=1 -- \
+  npx -y -p https://github.com/gndeepan/hermes-mcp/releases/latest/download/hermes-mcp.tgz hermes-mcp
 ```
 
 Or in an MCP client config:
@@ -27,16 +30,15 @@ Or in an MCP client config:
   "mcpServers": {
     "hermes": {
       "command": "npx",
-      "args": ["-y", "github:gndeepan/hermes-mcp"],
+      "args": ["-y", "-p", "https://github.com/gndeepan/hermes-mcp/releases/latest/download/hermes-mcp.tgz", "hermes-mcp"],
       "env": { "HERMES_SINGLE_USER": "1" }
     }
   }
 }
 ```
 
-npm clones the repo and builds it on install (`prepare`), so the first start
-takes a few seconds longer. The first tool call opens the Hermes sign-in in the
-browser; see [Signing in](#signing-in).
+The first tool call opens the Hermes sign-in in the browser; see [Signing in](#signing-in).
+Use `hermes-mcp-http` in place of `hermes-mcp` for the HTTP server.
 
 ### From Bitbucket Packages
 
